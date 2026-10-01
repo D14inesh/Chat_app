@@ -14,12 +14,16 @@
 # -ApiHttpsPort, the APK has to be rebuilt for the new port.
 param(
     [string]$PublicIp = '103.207.3.66',
-    [Parameter(Mandatory = $true)][string]$PgPassword,
+    [string]$PgPassword = '',   # only needed when there's no backend\.env yet
     [string]$PgUser = 'postgres',
     [int]$ApiPort = 4800,
     [int]$ApiHttpsPort = 4843,
     [int]$WebPort = 5800,
-    [int]$WebHttpsPort = 5843
+    [int]$WebHttpsPort = 5843,
+    # Folder of the old chat app on this server: its .env (database password,
+    # JWT secret, VAPID keys) and uploaded files are copied over. Read-only -
+    # nothing in the old folder is changed.
+    [string]$OldApp = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -66,12 +70,36 @@ if (-not (Test-Path $py)) { python -m venv (Join-Path $backend 'venv') }
 & $py -m pip install -r (Join-Path $backend 'requirements.txt') -q
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 
-Step 'backend\.env'
 $envFile = Join-Path $backend '.env'
+if ($OldApp) {
+    Step "Copy from the old app ($OldApp)"
+    if (-not (Test-Path $OldApp)) { throw "Old app folder not found: $OldApp" }
+    $oldEnv = Join-Path $OldApp '.env'
+    if (-not (Test-Path $envFile) -and (Test-Path $oldEnv)) {
+        Copy-Item $oldEnv $envFile
+        Write-Host '  .env copied (same database, same logins, same push keys).'
+    }
+    $oldUploads = Join-Path $OldApp 'uploads'
+    if (Test-Path $oldUploads) {
+        $storage = Join-Path $root 'storage'
+        # Old layout: uploads\<files>, uploads\avatars, uploads\wallpapers.
+        # New layout: storage\uploads, storage\avatars, storage\wallpapers.
+        robocopy $oldUploads (Join-Path $storage 'uploads') /XD avatars wallpapers /NFL /NDL /NJH /NJS /NP | Out-Null
+        foreach ($sub in 'avatars', 'wallpapers') {
+            $src = Join-Path $oldUploads $sub
+            if (Test-Path $src) { robocopy $src (Join-Path $storage $sub) /E /NFL /NDL /NJH /NJS /NP | Out-Null }
+        }
+        if ($LASTEXITCODE -ge 8) { throw 'Copying the old uploads failed' }
+        Write-Host '  uploaded files copied into storage\.'
+    }
+}
+
+Step 'backend\.env'
 if (Test-Path $envFile) {
     $text = [IO.File]::ReadAllText($envFile)
     Write-Host '  exists - keeping its passwords/keys, updating ports and allowed origins.'
 } else {
+    if (-not $PgPassword) { throw 'No backend\.env yet - copy your old chat app''s .env to backend\.env, or pass -PgPassword "<postgres password>".' }
     $bytes = New-Object byte[] 48
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $jwt = -join ($bytes | ForEach-Object { $_.ToString('x2') })
@@ -81,10 +109,18 @@ if (Test-Path $envFile) {
     $text = $text -replace '(?m)^JWT_SECRET=.*', "JWT_SECRET=$jwt"
     Write-Host '  created. For reminders (web push), copy VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY from your PC''s .env into it.'
 }
-$text = $text -replace '(?m)^PORT=.*', "PORT=$ApiPort"
-$text = $text -replace '(?m)^HTTPS_PORT=.*', "HTTPS_PORT=$ApiHttpsPort"
-$text = $text -replace '(?m)^SESSION_TTL=.*', 'SESSION_TTL=365d'
-$text = $text -replace '(?m)^CORS_ORIGINS=.*', "CORS_ORIGINS=https://${PublicIp}:$WebHttpsPort,http://${PublicIp}:$WebPort,http://localhost:$WebPort,https://localhost:$WebHttpsPort"
+# Set each line, or add it when missing (an old chat app .env has no
+# HTTPS_PORT / CORS_ORIGINS yet).
+function Set-EnvLine([string]$text, [string]$key, [string]$value) {
+    $pattern = "(?m)^$([regex]::Escape($key))=.*$"
+    if ($text -match $pattern) { return $text -replace $pattern, "$key=$value" }
+    return $text.TrimEnd() + "`r`n$key=$value`r`n"
+}
+$text = Set-EnvLine $text 'PORT' $ApiPort
+$text = Set-EnvLine $text 'HTTPS_PORT' $ApiHttpsPort
+$text = Set-EnvLine $text 'SESSION_TTL' '365d'
+$text = Set-EnvLine $text 'CORS_ORIGINS' "https://${PublicIp}:$WebHttpsPort,http://${PublicIp}:$WebPort,http://localhost:$WebPort,https://localhost:$WebHttpsPort"
+$text = Set-EnvLine $text 'COOKIE_SAMESITE' 'lax'
 [IO.File]::WriteAllText($envFile, $text, $utf8)
 
 Step 'frontend\.env'
