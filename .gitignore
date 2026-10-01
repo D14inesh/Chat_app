@@ -9,5 +9,6 @@ database/backups/*
 frontend/certs/
 backend/certs/
 backend/.env
+frontend/.env
 backend/venv/
 __pycache__/
