@@ -38,7 +38,9 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  // version.json must always come from the network — it's how open pages
+  // learn there's a new version (see app.js "Self-update").
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname === '/version.json') return;
 
   event.respondWith(
     fetch(request)

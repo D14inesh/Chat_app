@@ -36,3 +36,9 @@ else
   rm -f /etc/nginx/conf.d/ssl.conf
   echo "chat-frontend: no certs at /etc/nginx/certs — HTTP only"
 fi
+
+# 3. Fingerprint of the site's files — open apps poll this and update
+#    themselves when a new image is deployed (see app.js "Self-update").
+VERSION=$(cd "$HTML" && find . -type f ! -name version.json -exec md5sum {} + | sort | md5sum | cut -c1-16)
+printf '{"version":"%s"}\n' "$VERSION" > "$HTML/version.json"
+echo "chat-frontend: site version $VERSION"

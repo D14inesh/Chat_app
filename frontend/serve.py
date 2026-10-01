@@ -6,6 +6,8 @@ The frontend is plain HTML/CSS/JS in public/, so any static host works in
 production (nginx, IIS, Netlify, ...). Set the backend URL in public/config.js.
 """
 import functools
+import hashlib
+import json
 import os
 import ssl
 import threading
@@ -29,11 +31,33 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        if self.path.split("?")[0] == "/version.json":
+            return self._send_version()
         # An unknown extension-less path lands on the app shell rather than a
         # bare 404 page.
         if not Path(self.translate_path(self.path)).exists() and "." not in Path(self.path.split("?")[0]).name:
             self.path = "/index.html"
         super().do_GET()
+
+    def _send_version(self):
+        """A fingerprint of every file in public/ — changes whenever any file
+        is edited, so open apps notice and update themselves (see app.js
+        "Self-update"). Nothing to bump by hand."""
+        body = json.dumps({"version": site_version()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def site_version() -> str:
+    h = hashlib.sha256()
+    for f in sorted(PUBLIC_DIR.rglob("*")):
+        if f.is_file():
+            st = f.stat()
+            h.update(f"{f.relative_to(PUBLIC_DIR)}|{st.st_size}|{st.st_mtime_ns}".encode())
+    return h.hexdigest()[:16]
 
 
 def serve(server: ThreadingHTTPServer):

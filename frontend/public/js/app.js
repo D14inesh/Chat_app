@@ -9696,5 +9696,61 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
+// ═══════════════════════════════════════════════════════════
+// Self-update — new versions of the site apply on their own
+// ═══════════════════════════════════════════════════════════
+// The frontend server publishes /version.json, a fingerprint of the site's
+// files. When it changes, this page reloads itself at a moment it won't be
+// noticed: the tab is in the background, or nobody's touched it for two
+// minutes — never mid-call, mid-game, or with a half-typed message. The
+// login survives the reload (see tryResume), so updating is invisible.
+
+const UPDATE_CHECK_MS = 60_000;
+const UPDATE_IDLE_MS = 2 * 60_000;
+let loadedSiteVersion = null;
+let siteUpdatePending = false;
+let lastUserActivity = Date.now();
+
+for (const evt of ['pointerdown', 'keydown', 'touchstart', 'wheel']) {
+  addEventListener(evt, () => { lastUserActivity = Date.now(); }, { passive: true, capture: true });
+}
+
+async function fetchSiteVersion() {
+  try {
+    const res = await fetch('/version.json', { cache: 'no-store' });
+    if (!res.ok) return null;
+    return (await res.json()).version || null;
+  } catch { return null; } // offline — try again later
+}
+
+function busyForUpdate() {
+  const composer = $('composer-input');
+  return Boolean(
+    state.call || state.groupCall || state.liveGame || state.editingId ||
+    (composer && composer.value.trim()) ||
+    document.querySelector('.modal-backdrop')
+  );
+}
+
+function applySiteUpdateIfQuiet() {
+  if (!siteUpdatePending || busyForUpdate()) return;
+  if (document.hidden || Date.now() - lastUserActivity > UPDATE_IDLE_MS) location.reload();
+}
+
+async function checkSiteVersion() {
+  const v = await fetchSiteVersion();
+  if (!v) return;
+  if (!loadedSiteVersion) { loadedSiteVersion = v; return; }
+  if (v !== loadedSiteVersion) siteUpdatePending = true;
+  applySiteUpdateIfQuiet();
+}
+
+checkSiteVersion();
+setInterval(checkSiteVersion, UPDATE_CHECK_MS);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) applySiteUpdateIfQuiet();
+  else checkSiteVersion();
+});
+
 setAuthMode('login');
 gateAppLock().then(tryResume);
