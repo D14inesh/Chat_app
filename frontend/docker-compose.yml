@@ -1,0 +1,23 @@
+# Frontend only. Run from this folder:
+#   docker compose up -d --build
+#   -> http://localhost:8080   (LAN: https://<pc-ip>:8443 when certs/ exist)
+#
+# The backend runs separately. Tell the app where it is:
+#   - same PC / LAN: API_HTTP_PORT + API_HTTPS_PORT (backend on the page's host)
+#   - anywhere else: API_BASE=https://api.example.com
+# Values can go in a .env file next to this one.
+
+services:
+  frontend:
+    build: .
+    image: chat-frontend
+    environment:
+      API_BASE: ${API_BASE:-}
+      API_HTTP_PORT: ${API_HTTP_PORT:-8000}
+      API_HTTPS_PORT: ${API_HTTPS_PORT:-8444}
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+      - "${FRONTEND_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    restart: unless-stopped

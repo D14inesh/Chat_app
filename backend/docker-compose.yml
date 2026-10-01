@@ -1,0 +1,29 @@
+# Backend only. Run from this folder:
+#   docker compose up -d --build
+#   -> http://localhost:8000   (LAN: https://<pc-ip>:8444 when certs/ exist)
+#
+# Settings come from .env (PG*, JWT_SECRET, VAPID keys, CORS_ORIGINS, ...).
+# CORS_ORIGINS there must include wherever the frontend is opened.
+# The database is PostgreSQL on this PC, reached as host.docker.internal.
+
+services:
+  backend:
+    build: .
+    image: chat-backend
+    env_file: .env
+    environment:
+      # "localhost" inside a container is the container itself.
+      PGHOST: host.docker.internal
+      OLLAMA_URL: http://host.docker.internal:11434/api/chat
+      WHISPER_URL: http://host.docker.internal:8500
+      PORT: "4000"
+      HTTPS_PORT: "4443"
+    ports:
+      - "${BACKEND_PORT:-8000}:4000"
+      - "${BACKEND_HTTPS_PORT:-8444}:4443"
+    volumes:
+      - ${STORAGE_PATH:-../storage}:/data/storage   # uploads, avatars, wallpapers
+      - ./certs:/app/certs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"          # needed on Linux; harmless on Docker Desktop
+    restart: unless-stopped

@@ -1,0 +1,6 @@
+certs/
+serve.py
+Dockerfile
+docker-compose.yml
+.dockerignore
+**/*.log

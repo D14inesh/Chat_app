@@ -1,0 +1,13 @@
+logs/
+*.log
+storage/uploads/*
+storage/avatars/*
+storage/wallpapers/*
+!storage/**/.gitkeep
+database/backups/*
+!database/backups/.gitkeep
+frontend/certs/
+backend/certs/
+backend/.env
+backend/venv/
+__pycache__/
