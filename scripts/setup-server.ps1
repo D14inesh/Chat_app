@@ -140,8 +140,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Database setup failed - check PGUSER/PGPASSWORD in backend\.env' }
 
     Step "HTTPS certificate for $PublicIp"
-    & $py gen_cert.py $PublicIp
-    if ($LASTEXITCODE -ne 0) { throw 'Certificate generation failed' }
+    # Made once only - a new certificate would make every browser show the
+    # warning again. Delete backend\certs to force a new one.
+    if ((Test-Path (Join-Path $backend 'certs\cert.pem')) -and (Test-Path (Join-Path $frontend 'certs\cert.pem'))) {
+        Write-Host '  already exists - kept.'
+    } else {
+        & $py gen_cert.py $PublicIp
+        if ($LASTEXITCODE -ne 0) { throw 'Certificate generation failed' }
+    }
 } finally { Pop-Location }
 
 Step 'Firewall'
