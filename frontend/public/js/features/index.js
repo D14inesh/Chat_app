@@ -31,6 +31,7 @@ import { onMessagePinned } from './pins.js';
 import { onDisappearingChanged } from './disappearing.js';
 import { onViewOnceOpened } from './viewonce.js';
 import { onLoginAlert } from './security.js';
+import { onAnnouncement } from './admin.js';
 
 /** Live frames for the newer features. Returns true when handled. */
 export function handleFeatureFrame(frame) {
@@ -40,7 +41,10 @@ export function handleFeatureFrame(frame) {
     case 'disappearing-changed': onDisappearingChanged(frame); return true;
     case 'view-once-opened': onViewOnceOpened(frame); return true;
     case 'login-alert': onLoginAlert(frame); return true;
+    case 'announcement': onAnnouncement(frame); return true;
     default: return false;
   }
 }
 export { contactFieldsHtml, wireContactFields, openContactPanel, ensureContact } from './contact.js';
+export { openAnnouncements, onAnnouncement, refreshAnnouncementBadge, openAdminPanel, showAdminEntry } from './admin.js';
+export { openRecoveryKeySetup, nudgeRecoveryKey, openForgotPassword } from './recovery.js';

@@ -2,15 +2,18 @@
 import asyncio
 import random
 import re
+import time
 
 import asyncpg
 import bcrypt
+import jwt as pyjwt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
 from app.core.security import (
     bump_session_epoch, clear_session_cookie, require_auth, session_epoch,
     set_session_cookie, sign_session,
 )
+from app.core.config import JWT_SECRET
 from app.core.database import one, query
 from app.utils.devices import (
     bind_device, client_ip, device_id, device_label, device_owner, device_taken_message,
@@ -119,7 +122,8 @@ async def login(request: Request, response: Response):
     ident = str(username or "").strip().lower()
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance,
-                  password_hash, enc_private_key, phone, email, email_verified_at
+                  password_hash, enc_private_key, phone, email, email_verified_at,
+                  is_admin, enc_private_key_recovery, disabled_at
              FROM users WHERE username_lower = $1 OR phone = $2 OR lower(email) = $1
             ORDER BY (username_lower = $1) DESC LIMIT 1""",
         ident, normalize_phone(ident) or "",
@@ -131,6 +135,8 @@ async def login(request: Request, response: Response):
     ok = row and bcrypt.checkpw(str(password or "").encode(), row["password_hash"].encode())
     if not ok:
         raise HTTPException(401, "Wrong username, number, email or password.")
+    if row["disabled_at"]:
+        raise HTTPException(403, "This account has been suspended by the admin.")
 
     # One account per device: this device may only sign in as its owner.
     dev = device_id(request, response)
@@ -152,6 +158,8 @@ def with_contact(user: dict, row: dict) -> dict:
     user["phone"] = row.get("phone")
     user["email"] = row.get("email")
     user["contactVerified"] = bool(row.get("phone") and row.get("email_verified_at"))
+    user["isAdmin"] = bool(row.get("is_admin"))
+    user["hasRecoveryKey"] = bool(row.get("enc_private_key_recovery"))
     return user
 
 
@@ -165,12 +173,15 @@ async def logout(request: Request, response: Response):
 async def get_me(request: Request, response: Response, uid: str = Depends(require_auth)):
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business,
-                  phone, email, email_verified_at
+                  phone, email, email_verified_at, is_admin, enc_private_key_recovery, disabled_at
              FROM users WHERE id = $1""",
         uid,
     )
     if not row:
         raise HTTPException(401, "Not signed in")
+    if row["disabled_at"]:
+        clear_session_cookie(response, request)
+        raise HTTPException(401, "This account has been suspended by the admin.")
 
     # Sessions from before the one-account rule: the first account seen on
     # a device claims it; a second account's session there is ended.
@@ -190,6 +201,107 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
     # instead of being thrown out SESSION_TTL after their original login.
     set_session_cookie(response, sign_session(uid, await session_epoch(uid)), request)
     return {"user": user, "encPrivateKey": row["enc_private_key"]}
+
+
+@router.post("/recovery-key")
+async def save_recovery_key(request: Request, uid: str = Depends(require_auth)):
+    """Stores my private key wrapped with my recovery key (done in the app —
+    the server never sees the recovery key or the private key)."""
+    body = await request.json()
+    wrapped = body.get("encPrivateKeyRecovery")
+    if not isinstance(wrapped, dict) or not wrapped:
+        raise HTTPException(400, "Missing recovery data.")
+    await query("UPDATE users SET enc_private_key_recovery = $2 WHERE id = $1", uid, wrapped)
+    return {"ok": True}
+
+
+# ── Forgot password ───────────────────────────────────────────
+# 1. /reset/otp     emails a code to the account's verified Gmail
+# 2. /reset/verify  checks the code -> a 15-minute reset token, plus the
+#                   recovery-wrapped key if the user saved a recovery key
+# 3. /reset/complete sets the new password and the key wrapped with it
+#    (the same key re-wrapped when the recovery key was given — old chats
+#    stay readable — or a brand-new key when it wasn't). Every device is
+#    signed out.
+
+async def _reset_target(ident) -> dict:
+    ident = str(ident or "").strip().lower()
+    row = await one(
+        """SELECT id, username, phone, email, email_verified_at, enc_private_key_recovery, disabled_at
+             FROM users WHERE username_lower = $1 OR phone = $2 OR lower(email) = $1
+            ORDER BY (username_lower = $1) DESC LIMIT 1""",
+        ident, normalize_phone(ident) or "",
+    )
+    if not row:
+        raise HTTPException(404, "No account with that username, mobile number or Gmail.")
+    if row["disabled_at"]:
+        raise HTTPException(403, "This account has been suspended by the admin.")
+    if not (row["phone"] and row["email"] and row["email_verified_at"]):
+        raise HTTPException(400, "This account has no verified Gmail, so its password can't be reset by code. Ask the admin for help.")
+    return row
+
+
+def _mask_email(email: str) -> str:
+    name, _, domain = email.partition("@")
+    return (name[:2] + "•" * max(1, len(name) - 2)) + "@" + domain
+
+
+@router.post("/reset/otp")
+async def reset_send_code(request: Request):
+    body = await request.json()
+    row = await _reset_target(body.get("ident"))
+    res = await send_code(row["phone"], row["email"], "reset")
+    return {**res, "email": _mask_email(row["email"])}
+
+
+@router.post("/reset/verify")
+async def reset_verify(request: Request):
+    body = await request.json()
+    row = await _reset_target(body.get("ident"))
+    await check_code(row["phone"], row["email"], "reset", body.get("otp"))
+    token = pyjwt.encode(
+        {"sub": str(row["id"]), "purpose": "reset", "exp": int(time.time()) + 15 * 60},
+        JWT_SECRET, algorithm="HS256",
+    )
+    return {"resetToken": token, "username": row["username"], "recoveryWrapped": row["enc_private_key_recovery"]}
+
+
+@router.post("/reset/complete")
+async def reset_complete(request: Request):
+    from app.websocket import manager as hub
+
+    body = await request.json()
+    try:
+        claims = pyjwt.decode(str(body.get("resetToken") or ""), JWT_SECRET, algorithms=["HS256"])
+    except pyjwt.PyJWTError:
+        raise HTTPException(400, "This reset has expired — start again.")
+    if claims.get("purpose") != "reset":
+        raise HTTPException(400, "This reset has expired — start again.")
+    uid = claims["sub"]
+    password = body.get("password")
+    enc_private_key = body.get("encPrivateKey")
+    new_identity = bool(body.get("newIdentity"))
+    public_key = body.get("publicKey")
+    if not isinstance(password, str) or len(password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters.")
+    if not isinstance(enc_private_key, dict) or (new_identity and not isinstance(public_key, dict)):
+        raise HTTPException(400, "Missing encryption keys.")
+
+    hash_ = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
+    if new_identity:
+        # A new key can't open anything wrapped for the old one, so the old
+        # recovery data goes too.
+        await query(
+            """UPDATE users SET password_hash = $2, enc_private_key = $3, public_key = $4,
+                                enc_private_key_recovery = NULL WHERE id = $1""",
+            uid, hash_, enc_private_key, public_key,
+        )
+    else:
+        await query("UPDATE users SET password_hash = $2, enc_private_key = $3 WHERE id = $1",
+                    uid, hash_, enc_private_key)
+    epoch = await bump_session_epoch(uid)
+    await hub.close_sessions_older_than(uid, epoch)
+    return {"ok": True}
 
 
 @router.post("/otp")

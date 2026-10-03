@@ -91,3 +91,11 @@ MAIL_FROM = os.environ.get("MAIL_FROM", "") or SMTP_USER
 # Local testing without email: the code is returned to the app and shown
 # on screen. Never turn this on for the real server.
 OTP_DEV_MODE = os.environ.get("OTP_DEV_MODE", "").strip().lower() in ("1", "true", "yes")
+
+# Daily database backups (pg_dump custom format), made by the backend itself
+# once a day after BACKUP_HOUR (server time); the newest BACKUP_KEEP are kept.
+BACKUP_DIR = Path(os.environ.get("BACKUP_DIR") or (PROJECT_DIR / "database" / "backups"))
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "7"))
+BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "2"))
+# Full path to pg_dump.exe when it isn't found automatically.
+PG_BIN = os.environ.get("PG_BIN", "")

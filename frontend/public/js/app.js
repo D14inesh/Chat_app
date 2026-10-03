@@ -257,6 +257,7 @@ function setAuthMode(mode) {
   $('field-contact').querySelectorAll('input').forEach((i) => { i.disabled = !isRegister; });
   $('f-username-label').textContent = isRegister ? 'Username' : 'Username, mobile or Gmail';
   $('f-username').placeholder = isRegister ? 'ravi_kumar' : 'ravi_kumar or 98765 43210';
+  $('forgot-password').classList.toggle('hidden', isRegister);
   $('auth-toggle').querySelector('span').textContent =
     isRegister ? 'Already have an account?' : 'New here?';
   $('toggle-mode').textContent = isRegister ? 'Sign in' : 'Create an account';
@@ -782,6 +783,9 @@ async function enterApp(user) {
   F.startExpiryWatcher();  // hides disappearing messages the moment they expire
   connectSocket();         // its 'open' handler flushes the outbox
   F.ensureContact(user);   // older accounts: add a mobile number + Gmail once
+  F.showAdminEntry(user);
+  F.refreshAnnouncementBadge();
+  F.nudgeRecoveryKey(user);
 
   // Resume "Hey ARM" if it was on before — mirrors how a real assistant
   // stays armed across app launches once you've turned it on once. If the
@@ -7007,6 +7011,8 @@ $('sidebar-menu').addEventListener('click', (e) => {
   else if (action === 'quick-replies') F.openQuickRepliesPanel();
   else if (action === 'security') F.openSecurityPanel();
   else if (action === 'chat-features') F.openFeatureSettings();
+  else if (action === 'announcements') F.openAnnouncements();
+  else if (action === 'admin') F.openAdminPanel();
 });
 
 // ── Wallpaper ─────────────────────────────────────────────
@@ -10118,6 +10124,14 @@ F.bindFeatures({
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
 });
+
+// "Forgot password?" — finishes by signing in with the new password.
+$('forgot-password').addEventListener('click', () => F.openForgotPassword((username, password) => {
+  setAuthMode('login');
+  $('f-username').value = username;
+  $('f-password').value = password;
+  $('auth-form').requestSubmit();
+}));
 
 // Sign-up form: mobile number + Gmail + emailed code.
 $('field-contact').innerHTML = F.contactFieldsHtml();

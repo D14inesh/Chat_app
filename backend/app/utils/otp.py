@@ -102,9 +102,10 @@ async def send_code(phone: str, email: str, purpose: str) -> dict:
         raise HTTPException(503, "Email codes aren't set up on the server yet — ask the admin to add the Gmail settings.")
 
     recent = await one(
-        """SELECT count(*) AS n, max(created_at) > now() - make_interval(secs => $2) AS too_soon
+        """SELECT count(*) AS n,
+                  coalesce(max(created_at) FILTER (WHERE purpose = $3) > now() - make_interval(secs => $2), false) AS too_soon
              FROM email_otps WHERE lower(email) = $1 AND created_at > now() - interval '1 hour'""",
-        email, RESEND_AFTER_S,
+        email, RESEND_AFTER_S, purpose,
     )
     if recent["too_soon"]:
         raise HTTPException(429, f"A code was just sent — wait {RESEND_AFTER_S} seconds before asking again.")

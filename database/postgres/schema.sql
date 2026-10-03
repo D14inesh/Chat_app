@@ -653,3 +653,24 @@ CREATE TABLE IF NOT EXISTS email_otps (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_email_otps_email ON email_otps(lower(email), created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- Account recovery, admin, announcements
+-- ─────────────────────────────────────────────────────────────
+-- enc_private_key_recovery : the same private key, wrapped with the user's
+--   recovery key (shown to them once) instead of their password — lets a
+--   "forgot password" reset keep their old messages readable.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS enc_private_key_recovery jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
+-- Suspended by an admin: can't sign in, every session is ended.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS announcements_seen_at timestamptz NOT NULL DEFAULT now();
+
+-- Notices from the admin to everyone (plain text — not a chat message).
+CREATE TABLE IF NOT EXISTS announcements (
+  id         bigserial PRIMARY KEY,
+  title      text NOT NULL,
+  body       text NOT NULL,
+  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);

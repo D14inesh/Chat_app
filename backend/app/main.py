@@ -20,6 +20,7 @@ from app.core.config import CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_POR
 from app.core.database import close_pool, init_pool
 from app.schedulers.reminders_scheduler import run_reminder_scheduler
 from app.schedulers.scheduled_messages_scheduler import run_scheduled_messages_poller
+from app.utils.backup import run_daily_backups
 from app.websocket import manager as hub
 
 STATUS_SWEEP_S = 60 * 60  # housekeeping only — every read already filters by expires_at
@@ -123,6 +124,7 @@ async def lifespan(app: FastAPI):
     _background_tasks.append(asyncio.create_task(run_scheduled_messages_poller()))
     _background_tasks.append(asyncio.create_task(_status_sweep_loop()))
     _background_tasks.append(asyncio.create_task(_expiry_sweep_loop()))
+    _background_tasks.append(asyncio.create_task(run_daily_backups()))
 
     yield
 

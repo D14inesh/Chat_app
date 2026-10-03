@@ -125,7 +125,10 @@
       </div>
 
       <div class="field">
-        <label for="f-password">Password</label>
+        <div class="field-label-row">
+          <label for="f-password">Password</label>
+          <button type="button" class="link-btn" id="forgot-password">Forgot password?</button>
+        </div>
         <input id="f-password" name="password" type="password"
                autocomplete="current-password" placeholder="••••••••" required>
       </div>
@@ -299,6 +302,18 @@
               <path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/>
             </svg>
             Chat features
+          </button>
+          <button type="button" data-action="announcements">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>
+            </svg>
+            Announcements <span class="menu-badge hidden" id="announce-badge"></span>
+          </button>
+          <button type="button" data-action="admin" class="hidden" id="menu-admin">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>
+            </svg>
+            Admin panel
           </button>
           <div class="chat-menu-divider"></div>
           <button type="button" data-action="voice-commands">
