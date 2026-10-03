@@ -6034,7 +6034,7 @@ function openGames() {
   box.addEventListener('click', (e) => { if (e.target === box) close(); });
   box.querySelector('#games-close').addEventListener('click', close);
 
-  box.querySelector('#games-body').appendChild(offlineGamesCard());
+  box.querySelector('#games-body').appendChild(offlineGamesCard({ aiDown: false }));
 }
 
 async function openAiChat() {
@@ -6198,24 +6198,34 @@ const TRIVIA_BANK = [
 
 const TRIVIA_ROUND_LEN = 5;
 
-/** Menu of offline diversions, shown whenever the AI can't be reached. */
-function offlineGamesCard() {
+// Which intro the games menu shows: the AI chat falls back to it when the
+// model can't be reached; the Games button opens it directly.
+let gamesMenuAiDown = true;
+
+/** Menu of offline games — from the Games button, or as the AI chat's
+ *  fallback when the model can't be reached. */
+function offlineGamesCard({ aiDown = gamesMenuAiDown } = {}) {
+  gamesMenuAiDown = aiDown;
   const card = document.createElement('div');
   card.className = 'ai-quiz-card';
   card.innerHTML = `
     <div class="ai-quiz-intro">
-      <strong>Can't reach the AI right now.</strong>
-      Pick something to play while you wait — no connection needed:
+      ${aiDown
+        ? "<strong>Can't reach the AI right now.</strong> Pick something to play while you wait — no connection needed:"
+        : '<strong>Pick a game.</strong> Everything here works offline:'}
     </div>
     <div class="ai-games-menu">
+      <button type="button" class="btn-secondary" data-game="chess-ai">♟️ Chess vs computer</button>
       <button type="button" class="btn-secondary" data-game="trivia">Trivia quiz</button>
-      <button type="button" class="btn-secondary" data-game="chess">Chess — pass &amp; play</button>
+      <button type="button" class="btn-secondary" data-game="chess">Chess — 2 players (pass &amp; play)</button>
       <button type="button" class="btn-secondary" data-game="puzzle">Sliding puzzle</button>
     </div>`;
   card.querySelectorAll('[data-game]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const view = btn.dataset.game === 'trivia' ? triviaRound()
-        : btn.dataset.game === 'chess' ? chessGame()
+      const g = btn.dataset.game;
+      const view = g === 'trivia' ? triviaRound()
+        : g === 'chess-ai' ? chessGame({ vsComputer: true })
+        : g === 'chess' ? chessGame()
         : puzzleGame();
       card.replaceWith(view);
     });
@@ -6426,8 +6436,126 @@ function allLegalChessMoves(board, color) {
   return all;
 }
 
-function chessGame() {
+// ── Chess computer opponent — runs in the browser, no server/AI model. ───
+// Alpha-beta search over the same move rules as above, scoring material
+// plus simple positional bonuses. In the search, moves are pseudo-legal and
+// "capturing the king" ends a line (a cheap, standard way to see mate);
+// only the computer's actual choice is checked for full legality.
+
+const CHESS_VALUE = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+const CHESS_LEVELS = {
+  easy: { label: 'Easy', depth: 1, noise: 80 },
+  medium: { label: 'Medium', depth: 2, noise: 15 },
+  hard: { label: 'Hard', depth: 4, noise: 4 },
+};
+
+function chessPositional(type, r, c, color) {
+  const fromHome = color === 'w' ? 7 - r : r;          // 0 on own back rank
+  const center = 3.5 - Math.max(Math.abs(3.5 - r), Math.abs(3.5 - c)); // 0.5 edge … 3.5 centre
+  switch (type) {
+    case 'p': return (fromHome - 1) * 8 + (c >= 2 && c <= 5 ? center * 4 : 0);
+    case 'n': return center * 10 - 15;
+    case 'b': return center * 6;
+    case 'q': return center * 2;
+    case 'k': return fromHome === 0 ? 15 : -8 * fromHome; // keep the king home
+    default: return 0;
+  }
+}
+
+/** Score of the position for `color` (positive = good for `color`). */
+function chessEvaluate(board, color) {
+  let score = 0;
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const p = board[r][c];
+      if (!p) continue;
+      const v = CHESS_VALUE[p.type] + chessPositional(p.type, r, c, p.color);
+      score += p.color === color ? v : -v;
+    }
+  }
+  return score;
+}
+
+/** Pseudo-legal moves, captures first (best victim first) so alpha-beta cuts more. */
+function chessPseudoMoves(board, color) {
+  const moves = [];
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      if (board[r][c]?.color !== color) continue;
+      for (const to of chessPieceMoves(board, r, c)) {
+        const victim = board[to[0]][to[1]];
+        moves.push({ from: [r, c], to, order: victim ? CHESS_VALUE[victim.type] : 0 });
+      }
+    }
+  }
+  return moves.sort((a, b) => b.order - a.order);
+}
+
+function chessSearch(board, color, depth, alpha, beta) {
+  if (depth === 0) return chessEvaluate(board, color);
+  const opp = color === 'w' ? 'b' : 'w';
+  const moves = chessPseudoMoves(board, color);
+  if (!moves.length) return 0;
+  for (const m of moves) {
+    if (board[m.to[0]][m.to[1]]?.type === 'k') return 100000 + depth; // king falls = win
+    const score = -chessSearch(applyChessMove(board, m.from, m.to), opp, depth - 1, -beta, -alpha);
+    if (score >= beta) return score;
+    if (score > alpha) alpha = score;
+  }
+  return alpha;
+}
+
+/** The computer's move for `color`, or null when it has none. */
+function chessComputerMove(board, color, level) {
+  const { depth, noise } = CHESS_LEVELS[level] || CHESS_LEVELS.medium;
+  const opp = color === 'w' ? 'b' : 'w';
+  let best = null;
+  let bestScore = -Infinity;
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      for (const to of legalMovesFrom(board, r, c, color)) {
+        const next = applyChessMove(board, [r, c], to);
+        let score;
+        if (allLegalChessMoves(next, opp).length === 0) {
+          const k = findKing(next, opp);
+          score = isSquareAttacked(next, k[0], k[1], color) ? 1000000 : 0; // mate : stalemate
+        } else {
+          score = -chessSearch(next, opp, depth - 1, -Infinity, Infinity);
+        }
+        score += (Math.random() - 0.5) * 2 * noise; // a little variety; more on Easy
+        if (score > bestScore) { bestScore = score; best = { from: [r, c], to }; }
+      }
+    }
+  }
+  return best;
+}
+
+function chessGame({ vsComputer = false } = {}) {
   const card = gameCard('ai-chess-card');
+  const human = 'w';
+  const computer = 'b';
+  let level = 'medium';
+  let thinking = false;
+
+  if (vsComputer) {
+    const levels = document.createElement('div');
+    levels.className = 'ai-games-menu';
+    levels.style.cssText = 'display:flex;gap:6px;margin:4px 0 8px';
+    levels.innerHTML = Object.entries(CHESS_LEVELS).map(([key, l]) =>
+      `<button type="button" class="chat-filter-tab${key === level ? ' active' : ''}" data-level="${key}" style="flex:1">${l.label}</button>`
+    ).join('');
+    levels.querySelectorAll('[data-level]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        level = btn.dataset.level;
+        levels.querySelectorAll('[data-level]').forEach((b) => b.classList.toggle('active', b === btn));
+      });
+    });
+    const hint = document.createElement('div');
+    hint.className = 'ai-quiz-progress';
+    hint.textContent = 'You play White ♔ — the computer plays Black ♚';
+    card.append(levels, hint);
+  }
+
   const statusEl = document.createElement('div');
   statusEl.className = 'ai-chess-status';
   const boardEl = document.createElement('div');
@@ -6473,15 +6601,44 @@ function chessGame() {
       }
     }
 
-    let text = (st.turn === 'w' ? 'White' : 'Black') + ' to move';
-    if (st.status === 'checkmate') text = 'Checkmate — ' + (st.turn === 'w' ? 'Black' : 'White') + ' wins';
-    else if (st.status === 'stalemate') text = 'Stalemate — draw';
-    else if (inCheck) text += ' — check!';
+    let text;
+    if (vsComputer) {
+      if (st.status === 'checkmate') text = st.turn === human ? 'Checkmate — the computer wins' : '🎉 Checkmate — you win!';
+      else if (st.status === 'stalemate') text = 'Stalemate — draw';
+      else if (thinking) text = 'Computer is thinking…';
+      else text = st.turn === human ? (inCheck ? "Your move — you're in check!" : 'Your move') : 'Computer to move';
+    } else {
+      text = (st.turn === 'w' ? 'White' : 'Black') + ' to move';
+      if (st.status === 'checkmate') text = 'Checkmate — ' + (st.turn === 'w' ? 'Black' : 'White') + ' wins';
+      else if (st.status === 'stalemate') text = 'Stalemate — draw';
+      else if (inCheck) text += ' — check!';
+    }
     statusEl.textContent = text;
   }
 
+  function computerTurn() {
+    if (!vsComputer || st.status !== 'playing' || st.turn !== computer) return;
+    thinking = true;
+    render();
+    const game = st;
+    // Let the "thinking…" status paint before the (synchronous) search runs.
+    setTimeout(() => {
+      if (st !== game) return; // "New game" was pressed meanwhile
+      const move = chessComputerMove(st.board, computer, level);
+      thinking = false;
+      if (move) {
+        st.board = applyChessMove(st.board, move.from, move.to);
+        st.turn = human;
+        st.lastMove = move;
+      }
+      evaluateStatus();
+      render();
+    }, 60);
+  }
+
   function onSquareClick(r, c) {
-    if (st.status !== 'playing') return;
+    if (st.status !== 'playing' || thinking) return;
+    if (vsComputer && st.turn !== human) return;
     const piece = st.board[r][c];
 
     if (st.selected) {
@@ -6493,6 +6650,7 @@ function chessGame() {
         st.selected = null;
         evaluateStatus();
         render();
+        computerTurn();
         return;
       }
       st.selected = (piece && piece.color === st.turn) ? [r, c] : null;
@@ -6508,6 +6666,7 @@ function chessGame() {
 
   newBtn.addEventListener('click', () => {
     st = { board: initialChessBoard(), turn: 'w', selected: null, status: 'playing' };
+    thinking = false;
     render();
   });
 
