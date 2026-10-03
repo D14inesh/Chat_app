@@ -1148,15 +1148,20 @@ button { cursor: pointer; border: none; background: none; }
 
 /* ── Chat pane ───────────────────────────────────────────── */
 
+/* A column (like .sidebar): header, optional bars (pinned message, call
+   banner, notices), the message list, the composer. Only the message list
+   takes the spare height, however many optional bars are showing. */
 .chat-pane {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   background: var(--panel-2);
   min-height: 0;
   min-width: 0;
   backdrop-filter: var(--glass-blur, none);
   -webkit-backdrop-filter: var(--glass-blur, none);
 }
+.chat-pane > * { flex: none; }
+.chat-pane > .messages { flex: 1 1 0; min-height: 0; }
 
 /* Grid items default to min-width:auto (content-based), not 0 — so without
    this, any one of these three rows (most often the composer's icon row)
@@ -3884,7 +3889,7 @@ button { cursor: pointer; border: none; background: none; }
   }
 
   #app-screen.viewing-chat .sidebar { display: none; }
-  #app-screen.viewing-chat .chat-pane:not(.hidden) { display: grid; }
+  #app-screen.viewing-chat .chat-pane:not(.hidden) { display: flex; }
 
   .back-btn { display: grid; }
 

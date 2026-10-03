@@ -7,6 +7,7 @@ import {
   generateLinkEphemeral, sealIdentityForLink, openIdentityFromLink,
 } from './crypto.js';
 import { localStore } from './localstore.js';
+import * as F from './features/index.js';
 
 // ═══════════════════════════════════════════════════════════
 // Backend location (the API is served separately — see config.js)
@@ -142,7 +143,7 @@ async function saveAppearanceToServer(patch) {
 // Kinds whose ciphertext is a JSON payload (decrypt-then-parse), vs 'text'
 // which decrypts straight to a string. decryptFileMeta is a generic
 // decrypt+JSON.parse despite its name — reused here for every JSON kind.
-const JSON_KINDS = new Set(['file', 'voice', 'location', 'contact']);
+const JSON_KINDS = new Set(['file', 'voice', 'location', 'contact', 'poll']);
 
 async function decryptBody(key, m) {
   return JSON_KINDS.has(m.kind)
@@ -324,6 +325,22 @@ $('auth-form').addEventListener('submit', async (e) => {
     btn.textContent = original;
   }
 });
+
+/** This session was ended from another device ("Log out all other
+ *  devices"): wipe this device's copy, back to the login screen. */
+async function signedOutRemotely() {
+  clearKeyCache();
+  await clearSessionKey();
+  await localStore.clear();
+  clearOffline();
+  try { sessionStorage.setItem('veyon.signedOutRemotely', '1'); } catch { /* ignore */ }
+  location.reload();
+}
+
+if ((() => { try { return sessionStorage.getItem('veyon.signedOutRemotely'); } catch { return null; } })()) {
+  try { sessionStorage.removeItem('veyon.signedOutRemotely'); } catch { /* ignore */ }
+  setTimeout(() => toast('You were signed out from another device. Sign in again to continue.', true), 900);
+}
 
 $('logout-btn').addEventListener('click', async () => {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* leaving anyway */ }
@@ -617,6 +634,8 @@ function openEditProfile() {
       </div>
       <button type="button" class="btn-primary" id="edit-profile-save" style="margin-top:0">Save</button>
 
+      ${F.businessSectionHtml()}
+
       <div class="field" style="margin-top:20px">
         <label>Appearance</label>
         <div class="appearance-note" style="margin:-2px 0 10px">Applies on every device you sign in from.</div>
@@ -692,6 +711,7 @@ function openEditProfile() {
   });
 
   wireAppearanceControls(box);
+  F.wireBusinessSection(box);
 
   box.querySelector('#edit-profile-photo-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -744,6 +764,8 @@ async function enterApp(user) {
   await loadStarredIds();
   await loadLabels();
   await loadBlockedIds();
+  F.loadQuickReplies();    // "/" shortcuts in the composer (background)
+  F.startExpiryWatcher();  // hides disappearing messages the moment they expire
   connectSocket();         // its 'open' handler flushes the outbox
 
   // Resume "Hey ARM" if it was on before — mirrors how a real assistant
@@ -844,8 +866,14 @@ async function loadConversations() {
     conversations = readOffline(OFFLINE_CONVOS_KEY, []);
   }
 
+  // Someone new in the list (a request just arrived or was accepted)?
+  // Presence events only reach people who already share a chat, so fetch
+  // who's online again — otherwise they'd show "last seen" while online.
+  const hadNew = conversations.some((c) => !state.conversations.has(c.id));
+
   state.conversations.clear();
   for (const c of conversations) state.conversations.set(c.id, c);
+  if (hadNew && state.me) refreshPresence().then(() => { renderChatList(); updatePeerStatus(); });
 
   // Decrypt each sidebar preview so the list shows real text, not ciphertext.
   await Promise.all(conversations.map(async (c) => {
@@ -932,6 +960,8 @@ async function openConversation(id) {
 
   updatePeerStatus();
   updateRequestBar(convo);
+  F.renderDisappearingChip();
+  F.renderPinnedBar();
 
   // Clear the unread badge immediately — waiting for the server round-trip
   // makes the UI feel laggy.
@@ -941,6 +971,12 @@ async function openConversation(id) {
   $('messages').innerHTML = '<div class="empty-hint">Loading…</div>';
   cancelReply();
   cancelEdit();
+  F.hideQuickReplies();
+  // This chat's half-typed draft (if any) goes back into the composer.
+  input.value = F.getDraft(id);
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 132) + 'px';
+  $('send-btn').disabled = input.value.trim().length === 0;
 
   // Instant paint from what's already on this device — before any network,
   // so an already-opened chat shows immediately (and offline).
@@ -991,6 +1027,7 @@ async function openConversation(id) {
     localStore.putMessages(
       messages.filter((m) => !m.pending).map((m) => ({ m, body: state.plaintext.get(m.id) }))
     );
+    F.pruneExpired();
     renderMessages();
     sendSocket({ type: 'read', conversationId: id });
     refreshComposerSuggestions();
@@ -1084,6 +1121,7 @@ async function startChatWith(userId) {
     // Merge rather than overwrite — an existing chat already holds its history.
     if (!state.conversations.has(conversation.id)) {
       state.conversations.set(conversation.id, conversation);
+      await refreshPresence();   // a brand-new contact: learn if they're online
     }
 
     $('search-input').value = '';
@@ -1196,6 +1234,7 @@ function renderChatList() {
     const preview = pendingForMe ? 'Message request'
       : pendingForThem ? 'Waiting for them to accept'
       : c.lastMessage ? previewText(c) : (isGroup ? 'No messages yet' : 'Say hello');
+    const draftHtml = !pendingForMe ? F.draftPreviewHtml(c) : null;
 
     const chatLabels = state.labels.filter((l) => l.conversationIds.includes(c.id));
     const labelChips = chatLabels.length
@@ -1226,7 +1265,7 @@ function renderChatList() {
             </div>
           </div>
           <div class="row-2">
-            <span class="preview">${c.muted ? '🔕 ' : ''}${mine ? tickIcon(c.lastMessage, true) : ''}${escapeHtml(preview)}</span>
+            <span class="preview">${draftHtml || `${c.muted ? '🔕 ' : ''}${c.disappearSeconds ? '<span class="preview-timer" title="Disappearing messages on">⏱</span>' : ''}${mine ? tickIcon(c.lastMessage, true) : ''}${escapeHtml(preview)}`}</span>
             ${c.unread > 0 ? `<span class="badge">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
           </div>
           ${labelChips}
@@ -1319,6 +1358,8 @@ function renderSearchResults(users) {
 // Rendering — messages
 // ═══════════════════════════════════════════════════════════
 
+let renderedFor = { conversationId: null, ids: new Set() };
+
 function renderMessages() {
   const box = $('messages');
   const list = state.messages.get(state.activeId) || [];
@@ -1326,12 +1367,19 @@ function renderMessages() {
   const isGroup = convo?.kind === 'group';
 
   if (list.length === 0) {
-    box.innerHTML = '<div class="empty-hint">No messages yet — say something.</div>';
+    box.innerHTML = F.disappearingNoteHtml(convo) + '<div class="empty-hint">No messages yet — say something.</div>';
     return;
   }
 
-  let html = '';
+  let html = F.disappearingNoteHtml(convo);
   let lastDay = null;
+
+  // Only messages that weren't on screen before get the pop-in animation —
+  // a vote, a tick or a reaction re-renders the list and must not make
+  // every bubble fade in again (the whole chat would flicker).
+  const firstPaint = renderedFor.conversationId !== state.activeId;
+  if (firstPaint) renderedFor = { conversationId: state.activeId, ids: new Set() };
+  const seenBefore = renderedFor.ids;
 
   list.forEach((m, i) => {
     const day = dayKey(m.createdAt);
@@ -1372,13 +1420,15 @@ function renderMessages() {
           ${state.msgSelectMode && !m.pending && !m.deleted
             ? `<input type="checkbox" class="bubble-select-check" ${state.selectedMessageIds.has(m.id) ? 'checked' : ''} data-select-check="${escapeAttr(m.id)}">`
             : ''}
-          <div class="bubble ${mine ? 'me' : 'them'} ${m.pending ? 'pending' : ''}"
+          <div class="bubble ${mine ? 'me' : 'them'} ${m.pending ? 'pending' : ''} ${m.kind === 'poll' ? 'is-poll' : ''} ${F.isPinned(convo, m.id) ? 'is-pinned' : ''} ${firstPaint || seenBefore.has(m.id) ? 'seen' : ''}"
                data-id="${escapeAttr(m.id)}">
             ${bubbleActionsHtml(m, mine)}
             ${replyQuoteHtml(m)}
             ${bubbleBody(m)}
             ${reactionsHtml(m)}
             <div class="meta">
+              ${F.isPinned(convo, m.id) ? '<span class="pinned-mark" title="Pinned">📌</span>' : ''}
+              ${F.expiryMark(m)}
               ${m.editedAt ? '<span class="edited-tag">edited</span>' : ''}
               <span>${shortTime(m.createdAt)}</span>
               ${mine ? tickIcon(m) : ''}
@@ -1388,7 +1438,16 @@ function renderMessages() {
       </div>`;
   });
 
+  // Keep the reader where they are (voting on an old poll, translating an
+  // old message) — only follow to the bottom when they were already there
+  // or a new message just arrived.
+  const prevTop = box.scrollTop;
+  const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  const lastId = list[list.length - 1]?.id;
+  const newArrival = lastId && !seenBefore.has(lastId);
+
   box.innerHTML = html;
+  for (const m of list) renderedFor.ids.add(m.id);
   if (state.msgSelectMode) {
     box.querySelectorAll('.bubble-row.select-mode').forEach((row) => {
       row.addEventListener('click', () => toggleMessageSelected(row.dataset.selectMsg));
@@ -1406,8 +1465,12 @@ function renderMessages() {
     wireBubbleActions();
     wireReactionPills();
     wireReplyQuotes();
+    F.wirePolls(box);
+    F.wirePinButtons(box);
+    F.wireViewOnce(box);
+    F.wireTranslations(box);
   }
-  box.scrollTop = box.scrollHeight;
+  box.scrollTop = (firstPaint || wasAtBottom || newArrival) ? box.scrollHeight : prevTop;
 }
 
 /** A short preview string for any message kind — used both for the reply
@@ -1416,8 +1479,10 @@ function previewFor(m) {
   const plain = state.plaintext.get(m.id);
   if (plain === null || plain === undefined) return 'Encrypted message';
   switch (m.kind) {
+    case 'poll':     return F.pollPreview(plain);
     case 'file':
       if (typeof plain !== 'object') return 'Attachment';
+      if (m.viewOnce || plain.viewOnce) return F.viewOncePreview(plain);
       if (plain.gif) return 'GIF';
       if (plain.sticker) return 'Sticker';
       return plain.name;
@@ -1455,12 +1520,15 @@ function bubbleActionsHtml(m, mine) {
   if (m.pending || m.deleted) return '';
 
   const starred = state.starredIds.has(m.id);
+  const viewOnce = m.viewOnce || state.plaintext.get(m.id)?.viewOnce;
   return `
     <div class="bubble-actions">
       <button type="button" class="bubble-action-btn star-btn${starred ? ' active' : ''}" data-msg="${escapeAttr(m.id)}" title="${starred ? 'Unstar' : 'Star'}">${iconStar()}</button>
       <button type="button" class="bubble-action-btn react-btn" data-msg="${escapeAttr(m.id)}" title="React">${iconSmile()}</button>
       <button type="button" class="bubble-action-btn reply-btn" data-msg="${escapeAttr(m.id)}" title="Reply">${iconReply()}</button>
-      <button type="button" class="bubble-action-btn forward-btn" data-msg="${escapeAttr(m.id)}" title="Forward">${iconForward()}</button>
+      ${F.pinButtonHtml(m)}
+      ${F.translateButtonHtml(m)}
+      ${viewOnce ? '' : `<button type="button" class="bubble-action-btn forward-btn" data-msg="${escapeAttr(m.id)}" title="Forward">${iconForward()}</button>`}
       ${mine && m.kind === 'text'
         ? `<button type="button" class="bubble-action-btn edit-btn" data-msg="${escapeAttr(m.id)}" title="Edit">${iconEdit()}</button>`
         : ''}
@@ -1501,7 +1569,10 @@ function bubbleBody(m) {
             </div>`;
   }
 
+  if (m.kind === 'poll') return F.pollBody(m, plain);
+
   if (m.kind === 'file') {
+    if (m.viewOnce || plain.viewOnce) return F.viewOnceBody(m, plain);
     // Stickers and GIFs render inline (small, worth eager-decrypting) with no
     // bubble chrome — see wireInlineMedia().
     if (plain.sticker || plain.gif) {
@@ -1564,7 +1635,7 @@ function bubbleBody(m) {
   if (typeof plain === 'string' && isJumboEmoji(plain)) {
     return `<div class="text jumbo">${escapeHtml(plain)}</div>`;
   }
-  return `<div class="text">${linkify(escapeHtml(plain))}</div>`;
+  return `<div class="text">${linkify(escapeHtml(plain))}</div>${F.translationHtml(m)}`;
 }
 
 /** True for a message that's nothing but a handful of emoji — rendered big
@@ -1819,35 +1890,56 @@ function wireVoicePlayers() {
  * received, which the browser's own SpeechRecognition can't do after the
  * fact.
  */
+// messageId -> transcript text (or a Promise while it's being made), so a
+// transcript survives re-renders and is never requested twice.
+const voiceTranscripts = new Map();
+
 function wireVoiceTranscribeButtons() {
   document.querySelectorAll('.voice-transcribe-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const block = btn.closest('.voice-block');
-      const player = block.querySelector('.voice-player');
-      const transcriptEl = block.querySelector('.voice-transcript');
-      const msgId = player.dataset.msg;
+    const block = btn.closest('.voice-block');
+    const player = block.querySelector('.voice-player');
+    const transcriptEl = block.querySelector('.voice-transcript');
+    const msgId = player.dataset.msg;
+
+    const show = (text) => {
+      transcriptEl.classList.remove('hidden');
+      transcriptEl.textContent = text;
+    };
+
+    const run = async () => {
       const meta = state.plaintext.get(msgId);
-      if (!meta) return;
+      if (!meta || msgId.startsWith('temp-')) return;
+      const cached = voiceTranscripts.get(msgId);
+      if (typeof cached === 'string') { show(cached); return; }
 
       btn.disabled = true;
-      transcriptEl.classList.remove('hidden');
-      transcriptEl.textContent = 'Transcribing…';
-
-      try {
+      show('Transcribing…');
+      const job = cached || (async () => {
         const key = state.keys.get(state.activeId);
         const blob = await getDecryptedMediaBlob(player.dataset.file, key, meta.blobIv, meta.mime);
-
         const form = new FormData();
         form.append('audio', blob, 'voice-note.webm');
         const { text } = await api('/api/voice/transcribe', { method: 'POST', body: form });
-
-        transcriptEl.textContent = text?.trim() ? text.trim() : '(No speech detected.)';
+        return text?.trim() ? text.trim() : '(No speech detected.)';
+      })();
+      voiceTranscripts.set(msgId, job);
+      try {
+        const text = await job;
+        voiceTranscripts.set(msgId, text);
+        if (transcriptEl.isConnected) show(text);
+        else if (state.activeId) renderMessages();   // re-rendered meanwhile — paint into the new bubble
       } catch (err) {
-        transcriptEl.textContent = `Could not transcribe: ${err.message}`;
+        voiceTranscripts.delete(msgId);
+        if (transcriptEl.isConnected) show(`Could not transcribe: ${err.message}`);
       } finally {
         btn.disabled = false;
       }
-    });
+    };
+
+    btn.addEventListener('click', run);
+    const cached = voiceTranscripts.get(msgId);
+    if (typeof cached === 'string') show(cached);
+    else if (F.prefs.get('autoTranscribe') && !cached) run();   // "Auto voice-to-text" setting
   });
 }
 
@@ -2378,9 +2470,12 @@ input.addEventListener('input', () => {
   $('send-btn').disabled = input.value.trim().length === 0;
   signalTyping();
   refreshComposerSuggestions();
+  if (!state.editingId) F.setDraft(state.activeId, input.value);   // keep a draft per chat
+  F.quickReplyInput(input);                                         // "/shortcut" popup
 });
 
 input.addEventListener('keydown', (e) => {
+  if (F.quickReplyKeydown(e, input)) return;   // the "/" popup took the key
   // Enter sends (or submits an edit); Shift+Enter makes a new line. Escape
   // backs out of an in-progress edit without sending anything.
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -2682,22 +2777,25 @@ function renderComposerSuggestions() {
     return;
   }
 
-  // Empty composer → context-aware quick replies to the last message.
-  const replies = quickRepliesFor(lastIncomingText());
-  if (!replies.length) { bar.classList.add('hidden'); return; }
+  // Empty composer → context-aware quick replies to the last message, plus
+  // the AI "Smart replies" chip.
+  const fill = (r) => {
+    input.value = r;
+    input.focus();
+    input.dispatchEvent(new Event('input'));
+  };
+  const lastIn = lastIncomingText();
+  const replies = quickRepliesFor(lastIn);
   for (const r of replies) {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'suggest-chip';
     chip.textContent = r;
-    chip.addEventListener('click', () => {
-      input.value = r;
-      input.focus();
-      input.dispatchEvent(new Event('input'));
-    });
+    chip.addEventListener('click', () => fill(r));
     bar.appendChild(chip);
   }
-  bar.classList.remove('hidden');
+  if (lastIn) F.smartReplyChips(bar, fill);
+  bar.classList.toggle('hidden', !bar.children.length);
 }
 
 function acceptComposerCompletion() {
@@ -2741,7 +2839,11 @@ async function sendMessage(explicitText) {
     input.value = '';
     input.style.height = 'auto';
     $('send-btn').disabled = true;
+    F.clearDraft(conversationId);
+    F.hideQuickReplies();
+    renderChatList();
   }
+  F.maybePlayEffect(text);
   learnFromSent(text);
   refreshComposerSuggestions();
   stopTyping();
@@ -2786,6 +2888,8 @@ $('attach-menu').addEventListener('click', (e) => {
   if (action === 'file') $('file-input').click();
   else if (action === 'location') shareLocation();
   else if (action === 'contact') openContactForm();
+  else if (action === 'poll') F.openPollComposer();
+  else if (action === 'view-once') F.pickViewOnce();
 });
 
 $('file-input').addEventListener('change', (e) => {
@@ -2816,7 +2920,8 @@ async function sendMediaFile(file, extra = {}) {
   try {
     const key = await keyFor(convo);
     const { blob, ciphertext, iv } = await encryptFile(key, file, extra);
-    const baseFrame = { type: 'send', conversationId, ciphertext, iv, kind: 'file', tempId };
+    const baseFrame = { type: 'send', conversationId, ciphertext, iv, kind: 'file', tempId,
+                        ...(extra.viewOnce ? { viewOnce: true } : {}) };
 
     if (offline()) {
       // Hold the encrypted blob in the outbox — flushOutbox() uploads it and
@@ -3370,8 +3475,20 @@ function connectSocket() {
     handleFrame(frame);
   });
 
-  ws.addEventListener('close', (e) => {
-    if (e.code === 4001) return;   // auth failed — reconnecting won't help
+  ws.addEventListener('close', async (e) => {
+    if (e.code === 4001) {
+      // Either "log out all other devices" was used elsewhere (this session
+      // is gone), or another device just did it and this one holds the new
+      // session — ask the server which.
+      try {
+        await api('/api/auth/me');
+        reconnectDelay = 1000;
+        setTimeout(connectSocket, 300);
+      } catch (err) {
+        if (err.status === 401) await signedOutRemotely();
+      }
+      return;
+    }
 
     // Exponential backoff, capped, so a server restart doesn't get hammered.
     setTimeout(connectSocket, reconnectDelay);
@@ -3523,6 +3640,8 @@ async function handleFrame(frame) {
           }
           state.plaintext.delete(frame.tempId);
           list[i] = frame.message;
+          // Same bubble, real id now — it already popped in as the pending one.
+          if (renderedFor.ids.has(frame.tempId)) renderedFor.ids.add(frame.message.id);
           localStore.putMessage(frame.message, state.plaintext.get(frame.message.id));
         }
       }
@@ -3655,6 +3774,7 @@ async function handleFrame(frame) {
         if (frame.conversationId === state.activeId) updateRequestBar(c);
         renderChatList();
         toast(`${c.peer?.displayName || 'They'} accepted your message request.`);
+        refreshPresence().then(() => { renderChatList(); updatePeerStatus(); });
       }
       break;
     }
@@ -3692,6 +3812,9 @@ async function handleFrame(frame) {
     case 'group-call-error':             onGroupCallErrorReceived(frame); break;
 
     case 'game-signal': onGameSignal(frame); break;
+
+    // Polls, pins, disappearing & view-once messages, login alerts.
+    default: F.handleFeatureFrame(frame); break;
   }
 }
 
@@ -3723,6 +3846,7 @@ async function onIncoming(frame) {
   if (conversationId === state.activeId) {
     renderMessages();
     showPeerTyping(false);
+    if (message.kind === 'text' && message.senderId !== state.me.id) F.maybePlayEffect(state.plaintext.get(message.id));
     sendSocket({ type: 'read', conversationId });   // we're looking at it
     if (!input.value.trim()) refreshComposerSuggestions();   // fresh quick replies
   } else if (message.senderId !== state.me.id) {
@@ -6832,6 +6956,9 @@ $('chat-menu').addEventListener('click', (e) => {
   else if (action === 'block') toggleBlockActiveChatPeer();
   else if (action === 'clear-chat') clearActiveChat();
   else if (action === 'delete-chat') deleteActiveChat();
+  else if (action === 'disappearing') F.openDisappearingPicker();
+  else if (action === 'summarize') F.openSummarize();
+  else if (action === 'export') F.openExportChat();
 });
 
 // ── Sidebar overflow menu — starred, select chats, mark all read, app lock ──
@@ -6855,6 +6982,10 @@ $('sidebar-menu').addEventListener('click', (e) => {
   else if (action === 'linked-devices') openLinkedDevicesPanel();
   else if (action === 'storage') openStoragePanel();
   else if (action === 'voice-commands') toggleVoiceCommands();
+  else if (action === 'broadcasts') F.openBroadcastsPanel();
+  else if (action === 'quick-replies') F.openQuickRepliesPanel();
+  else if (action === 'security') F.openSecurityPanel();
+  else if (action === 'chat-features') F.openFeatureSettings();
 });
 
 // ── Wallpaper ─────────────────────────────────────────────
@@ -7444,6 +7575,8 @@ const LIVE_GAMES = {
   chess: { label: 'Chess', emoji: '♟️' },
   'candy-crush': { label: 'Candy Crush', emoji: '🍬' },
   pong: { label: 'Pong', emoji: '🏓' },
+  tictactoe: { label: 'Tic-tac-toe', emoji: '❌' },
+  snakes: { label: 'Snake & Ladder', emoji: '🐍' },
 };
 
 function sendGameSignal(data) {
@@ -7625,6 +7758,8 @@ function startGameUI() {
   else if (g.game === 'chess') startLiveChessGame();
   else if (g.game === 'candy-crush') startCandyCrushGame();
   else if (g.game === 'pong') startPongGame();
+  else if (g.game === 'tictactoe') F.startTicTacToe();
+  else if (g.game === 'snakes') F.startSnakes();
 }
 
 function applyRemoteGameMove(move) {
@@ -7642,6 +7777,10 @@ function applyRemoteGameMove(move) {
     if (move.type === 'pong-init') onPongRemoteInit(move.startAt);
     else if (move.type === 'pong-state') onPongRemoteState(move.state);
     else if (move.type === 'pong-paddle') onPongRemotePaddle(move.y);
+  } else if (g.game === 'tictactoe') {
+    F.applyTicTacToeMove(move);
+  } else if (g.game === 'snakes') {
+    F.applySnakesMove(move);
   }
 }
 
@@ -8741,6 +8880,7 @@ function openContactInfo() {
         <div class="contact-info-label">About</div>
         <div class="contact-info-about">${escapeHtml(peer.about || 'Available')}</div>
       </div>
+      <div id="contact-business"></div>
 
       <div class="contact-info-list">
         ${row('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>', 'fav')}
@@ -8758,6 +8898,10 @@ function openContactInfo() {
   const close = () => box.remove();
   box.addEventListener('click', (e) => { if (e.target === box) close(); });
   box.querySelector('#contact-info-close').addEventListener('click', close);
+  F.businessBlockFor(peer.id).then((html) => {
+    const slot = box.querySelector('#contact-business');
+    if (slot) slot.outerHTML = html || '';
+  });
 
   const label = (act, text) => {
     const el = box.querySelector(`[data-act="${act}"] span`);
@@ -9658,6 +9802,30 @@ async function extendSearchHistory(conversationId) {
   }
 }
 
+/** Loads one older page of a chat's history in front of what's loaded.
+ *  Returns how many messages came back (0 = start of the chat reached). */
+async function loadOlderMessages(conversationId) {
+  const convo = state.conversations.get(conversationId);
+  const list = state.messages.get(conversationId) || [];
+  const oldest = list.find((m) => !m.pending);
+  if (!convo || !oldest) return 0;
+  const { messages } = await api(
+    `/api/conversations/${conversationId}/messages?before=${encodeURIComponent(oldest.createdAt)}`
+  );
+  if (!messages.length) return 0;
+  const key = await keyFor(convo);
+  for (const m of messages) {
+    if (!state.plaintext.has(m.id)) {
+      try { state.plaintext.set(m.id, await decryptBody(key, m)); } catch { state.plaintext.set(m.id, null); }
+    }
+  }
+  await decryptReactionsFor(key, messages);
+  const known = new Set((state.messages.get(conversationId) || []).map((m) => m.id));
+  state.messages.set(conversationId, [...messages.filter((m) => !known.has(m.id)), ...(state.messages.get(conversationId) || [])]);
+  if (conversationId === state.activeId) renderMessages();
+  return messages.length;
+}
+
 function runSearch(term) {
   const q = term.trim().toLowerCase();
   if (!q) {
@@ -9909,6 +10077,25 @@ setInterval(checkSiteVersion, UPDATE_CHECK_MS);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) applySiteUpdateIfQuiet();
   else checkSiteVersion();
+});
+
+// Escape closes the top-most dialog — every dialog already closes when its
+// backdrop is clicked, so this simply does that for the last one opened.
+// The live-game window is skipped: leaving a game should be deliberate.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  const dialogs = [...document.querySelectorAll('.modal-backdrop')].filter((d) => d.id !== 'live-game-modal');
+  const top = dialogs[dialogs.length - 1];
+  if (top) top.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+});
+
+// The feature modules (js/features/) get exactly what they use, nothing more.
+F.bindFeatures({
+  state, $, api, apiUrl, toast, escapeHtml, escapeAttr, avatarInner, linkify, shortTime,
+  keyFor, decryptBody, encryptText, decryptFileBytes, sendSocket, canSendTo,
+  renderMessages, renderChatList, refreshComposerSuggestions, pushMessage, previewFor, senderInfo,
+  sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
+  openLinkedDevicesPanel, openLiveGameModal, sendGameSignal,
 });
 
 setAuthMode('login');

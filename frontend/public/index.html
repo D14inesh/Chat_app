@@ -35,6 +35,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/theme.css">
+<link rel="stylesheet" href="/css/features.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%232F6BFF'/><path d='M9 9l7 14 7-14' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <!-- PWA: lets "Install app" show up on both desktop and mobile browsers,
      and gives it a real icon + standalone window instead of opening as a
@@ -272,6 +273,31 @@
             Storage &amp; data
           </button>
           <div class="chat-menu-divider"></div>
+          <button type="button" data-action="broadcasts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>
+            </svg>
+            Broadcast lists
+          </button>
+          <button type="button" data-action="quick-replies">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+            </svg>
+            Quick replies
+          </button>
+          <button type="button" data-action="security">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>
+            </svg>
+            Security &amp; logins
+          </button>
+          <button type="button" data-action="chat-features">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/>
+            </svg>
+            Chat features
+          </button>
+          <div class="chat-menu-divider"></div>
           <button type="button" data-action="voice-commands">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
@@ -357,7 +383,10 @@
       </button>
       <div class="avatar" id="peer-avatar"></div>
       <div class="grow">
-        <div class="peer-name" id="peer-name"></div>
+        <div class="peer-name-row">
+          <div class="peer-name" id="peer-name"></div>
+          <span class="disappear-chip hidden" id="disappear-chip"></span>
+        </div>
         <div class="peer-status" id="peer-status"></div>
       </div>
       <button class="icon-btn hidden" id="audio-call-btn" title="Audio call" aria-label="Audio call">
@@ -453,6 +482,24 @@
             </svg>
             Schedule a message
           </button>
+          <button type="button" data-action="disappearing">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M9 2h6"/>
+            </svg>
+            Disappearing messages
+          </button>
+          <button type="button" data-action="summarize">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8z"/>
+            </svg>
+            Summarize chat
+          </button>
+          <button type="button" data-action="export">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export chat
+          </button>
           <button type="button" data-action="play-game">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round">
@@ -516,6 +563,8 @@
         </button>
       </div>
     </header>
+
+    <div class="pinned-bar hidden" id="pinned-bar" role="button" tabindex="0"></div>
 
     <div class="messages" id="messages"></div>
 
@@ -621,6 +670,20 @@
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
               </svg>
               Contact
+            </button>
+            <button type="button" data-action="poll">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+              Poll
+            </button>
+            <button type="button" data-action="view-once">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M11 8h1.5v8"/>
+              </svg>
+              View-once photo
             </button>
           </div>
         </div>
