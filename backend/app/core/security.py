@@ -25,22 +25,60 @@ def _ttl_seconds(ttl: str | int) -> int:
     return int(value) * _UNIT_SECONDS[unit.lower()]
 
 
-def sign_session(user_id: str) -> str:
+def sign_session(user_id: str, epoch: int = 0) -> str:
     import time
     now = int(time.time())
-    payload = {"sub": user_id, "iat": now, "exp": now + _ttl_seconds(SESSION_TTL)}
+    payload = {"sub": user_id, "iat": now, "exp": now + _ttl_seconds(SESSION_TTL), "ep": epoch}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
-def verify_session(token: str | None) -> str | None:
-    """Returns the user id, or None if the token is missing/expired/forged."""
+def _decode(token: str | None) -> dict | None:
     if not token:
         return None
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("sub")
+        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
         return None
+
+
+def verify_session(token: str | None) -> str | None:
+    """Returns the user id, or None if the token is missing/expired/forged.
+    Signature/expiry only — see verify_session_live for the epoch check."""
+    payload = _decode(token)
+    return payload.get("sub") if payload else None
+
+
+# "Log out all other devices" bumps users.session_epoch; tokens carrying an
+# older epoch are refused. Cached per user so a request doesn't cost a query
+# (this process is the only writer of the column — see bump_session_epoch).
+_epoch_cache: dict[str, int] = {}
+
+
+async def session_epoch(user_id: str) -> int:
+    if user_id not in _epoch_cache:
+        from app.core.database import one
+        row = await one("SELECT session_epoch FROM users WHERE id = $1", user_id)
+        _epoch_cache[user_id] = row["session_epoch"] if row else 0
+    return _epoch_cache[user_id]
+
+
+async def bump_session_epoch(user_id: str) -> int:
+    from app.core.database import one
+    row = await one("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = $1 RETURNING session_epoch", user_id)
+    _epoch_cache[user_id] = row["session_epoch"]
+    return row["session_epoch"]
+
+
+async def verify_session_live(token: str | None) -> tuple[str, int] | None:
+    """(user id, token epoch) for a valid token that hasn't been revoked by
+    "log out other devices"; None otherwise."""
+    payload = _decode(token)
+    if not payload or not payload.get("sub"):
+        return None
+    epoch = int(payload.get("ep") or 0)
+    if epoch < await session_epoch(payload["sub"]):
+        return None
+    return payload["sub"], epoch
 
 
 def set_session_cookie(response: Response, token: str, request: Request):
@@ -77,10 +115,10 @@ def _cookie_secure(request: Request) -> bool:
 async def require_auth(request: Request, vesper_session: str | None = Cookie(default=None)) -> str:
     """FastAPI dependency — 401s unless a valid session cookie is present.
     Use as: `user_id: str = Depends(require_auth)`."""
-    user_id = verify_session(vesper_session)
-    if not user_id:
+    live = await verify_session_live(vesper_session)
+    if not live:
         raise HTTPException(status_code=401, detail="Not signed in")
-    return user_id
+    return live[0]
 
 
 async def optional_auth(vesper_session: str | None = Cookie(default=None)) -> str | None:

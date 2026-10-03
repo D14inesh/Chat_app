@@ -28,6 +28,34 @@ WALLPAPER_KEYS = {
 }
 WALLPAPER_FIT_KEYS = {"cover", "contain", "fill", "tile"}
 
+MESSAGE_COLUMNS = """m.id, m.sender_id, m.kind, m.ciphertext, m.iv, m.file_path, m.file_size,
+                     m.created_at, m.edited_at, m.reply_to_id, m.view_once, m.expires_at"""
+
+
+async def message_extras(message_ids: list[str]) -> tuple[dict, dict, dict]:
+    """Reactions, poll votes and view-once opens for a batch of messages."""
+    reactions: dict[str, list] = {}
+    votes: dict[str, list] = {}
+    opens: dict[str, list] = {}
+    if not message_ids:
+        return reactions, votes, opens
+    for r in await query(
+        "SELECT message_id, user_id, ciphertext, iv FROM message_reactions WHERE message_id = ANY($1::uuid[])",
+        message_ids,
+    ):
+        reactions.setdefault(r["message_id"], []).append({"userId": r["user_id"], "ciphertext": r["ciphertext"], "iv": r["iv"]})
+    for r in await query(
+        "SELECT message_id, user_id, choices FROM poll_votes WHERE message_id = ANY($1::uuid[]) ORDER BY voted_at",
+        message_ids,
+    ):
+        votes.setdefault(r["message_id"], []).append({"userId": r["user_id"], "choices": list(r["choices"])})
+    for r in await query(
+        "SELECT message_id, user_id FROM message_opens WHERE message_id = ANY($1::uuid[])",
+        message_ids,
+    ):
+        opens.setdefault(r["message_id"], []).append(r["user_id"])
+    return reactions, votes, opens
+
 
 @router.get("")
 async def list_conversations(user_id: str = Depends(require_auth)):
@@ -56,13 +84,14 @@ async def list_conversations(user_id: str = Depends(require_auth)):
            last_msg AS (
              SELECT DISTINCT ON (m.conversation_id)
                     m.conversation_id, m.id, m.sender_id, m.kind, m.ciphertext, m.iv,
-                    m.created_at,
+                    m.created_at, m.view_once,
                     (SELECT MIN(delivered_at) FROM message_receipts WHERE message_id = m.id) AS delivered_at,
                     (SELECT CASE WHEN bool_and(read_at IS NOT NULL) THEN MAX(read_at) ELSE NULL END
                        FROM message_receipts WHERE message_id = m.id) AS read_at
                FROM messages m
                JOIN mine ON mine.conversation_id = m.conversation_id
               WHERE m.deleted_at IS NULL
+                AND (m.expires_at IS NULL OR m.expires_at > now())
                 AND m.created_at > COALESCE(mine.cleared_at, '-infinity'::timestamptz)
                 AND NOT EXISTS (
                   SELECT 1 FROM message_hides mh WHERE mh.message_id = m.id AND mh.user_id = $1
@@ -77,7 +106,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
               GROUP BY m.conversation_id
            )
            SELECT c.id, c.kind, c.title, c.avatar_color AS group_avatar_color,
-                  c.status, c.requested_by,
+                  c.status, c.requested_by, c.disappear_seconds, c.pinned_message_id, c.pinned_by,
                   p.id AS peer_id, p.username AS peer_username,
                   p.display_name AS peer_name, p.avatar_color AS peer_color,
                   p.about AS peer_about, p.photo_path AS peer_photo_path,
@@ -86,7 +115,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
                   lm.id AS last_id, lm.sender_id AS last_sender,
                   lm.kind AS last_kind, lm.ciphertext AS last_ciphertext,
                   lm.iv AS last_iv, lm.created_at AS last_at,
-                  lm.delivered_at AS last_delivered, lm.read_at AS last_read,
+                  lm.delivered_at AS last_delivered, lm.read_at AS last_read, lm.view_once AS last_view_once,
                   COALESCE(un.n, 0) AS unread,
                   mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted
              FROM conversations c
@@ -100,6 +129,23 @@ async def list_conversations(user_id: str = Depends(require_auth)):
             ORDER BY COALESCE(lm.created_at, c.created_at) DESC""",
         user_id,
     )
+
+    # Pinned messages, fetched in one go (they're often older than anything
+    # the chat has loaded, so the client can't just look them up).
+    pinned_ids = [r["pinned_message_id"] for r in rows if r.get("pinned_message_id")]
+    pinned: dict[str, dict] = {}
+    if pinned_ids:
+        for m in await query(
+            f"""SELECT {MESSAGE_COLUMNS} FROM messages m
+                 WHERE m.id = ANY($1::uuid[]) AND m.deleted_at IS NULL
+                   AND (m.expires_at IS NULL OR m.expires_at > now())""",
+            pinned_ids,
+        ):
+            pinned[m["id"]] = shape_message(m)
+    for r in rows:
+        r["pinned_message"] = pinned.get(r.get("pinned_message_id"))
+        if not r["pinned_message"]:
+            r["pinned_by"] = None
     return {"conversations": [shape_conversation(r) for r in rows]}
 
 
@@ -449,14 +495,14 @@ async def list_messages(conversation_id: str, before: str | None = None, user_id
     before_dt = datetime.fromisoformat(before.replace("Z", "+00:00")) if before else None
 
     rows = await query(
-        """SELECT m.id, m.sender_id, m.kind, m.ciphertext, m.iv,
-                  m.file_path, m.file_size, m.created_at, m.edited_at, m.reply_to_id,
+        f"""SELECT {MESSAGE_COLUMNS},
                   (SELECT MIN(delivered_at) FROM message_receipts WHERE message_id = m.id) AS delivered_at,
                   (SELECT CASE WHEN bool_and(read_at IS NOT NULL) THEN MAX(read_at) ELSE NULL END
                      FROM message_receipts WHERE message_id = m.id) AS read_at
              FROM messages m
             WHERE m.conversation_id = $1
               AND m.deleted_at IS NULL
+              AND (m.expires_at IS NULL OR m.expires_at > now())
               AND ($2::timestamptz IS NULL OR m.created_at < $2)
               AND m.created_at > COALESCE($3::timestamptz, '-infinity'::timestamptz)
               AND NOT EXISTS (
@@ -467,17 +513,10 @@ async def list_messages(conversation_id: str, before: str | None = None, user_id
         conversation_id, before_dt, member["cleared_at"], user_id,
     )
 
-    message_ids = [r["id"] for r in rows]
-    reactions_by_message: dict[str, list] = {}
-    if message_ids:
-        reaction_rows = await query(
-            "SELECT message_id, user_id, ciphertext, iv FROM message_reactions WHERE message_id = ANY($1::uuid[])",
-            message_ids,
-        )
-        for r in reaction_rows:
-            reactions_by_message.setdefault(r["message_id"], []).append(
-                {"userId": r["user_id"], "ciphertext": r["ciphertext"], "iv": r["iv"]}
-            )
+    reactions, votes, opens = await message_extras([r["id"] for r in rows])
 
     rows.reverse()  # query pulls newest-first for LIMIT; the UI wants oldest-first
-    return {"messages": [shape_message(r, reactions_by_message.get(r["id"], [])) for r in rows]}
+    return {"messages": [
+        shape_message(r, reactions.get(r["id"], []), votes.get(r["id"], []), opens.get(r["id"], []))
+        for r in rows
+    ]}

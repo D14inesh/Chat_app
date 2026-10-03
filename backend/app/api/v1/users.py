@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.core.security import require_auth
 from app.core.config import AVATAR_DIR
 from app.core.database import execute, one, query, row_count
-from app.utils.serializers import shape_user
+from app.utils.serializers import shape_business, shape_user
 
 router = APIRouter(prefix="/api/users", dependencies=[Depends(require_auth)])
 
@@ -126,6 +126,23 @@ async def update_me(request: Request, user_id: str = Depends(require_auth)):
     return {"user": shape_user(row)}
 
 
+BUSINESS_LIMITS = {"category": 40, "description": 300, "address": 200, "hours": 120, "email": 120, "website": 200}
+
+
+@router.patch("/me/business")
+async def update_business(request: Request, user_id: str = Depends(require_auth)):
+    """Business profile: category, description, address, hours, email,
+    website. `enabled: false` hides it without losing what was typed."""
+    body = await request.json()
+    business = {"enabled": bool(body.get("enabled"))}
+    for key, limit in BUSINESS_LIMITS.items():
+        business[key] = str(body.get(key) or "").strip()[:limit]
+    if business["website"] and not business["website"].lower().startswith(("http://", "https://")):
+        business["website"] = "https://" + business["website"]
+    row = await one("UPDATE users SET business = $2 WHERE id = $1 RETURNING business", user_id, business)
+    return {"businessSettings": row["business"], "business": shape_business(row["business"])}
+
+
 @router.patch("/me/appearance")
 async def update_appearance(request: Request, user_id: str = Depends(require_auth)):
     body = await request.json()
@@ -146,7 +163,7 @@ async def update_appearance(request: Request, user_id: str = Depends(require_aut
 @router.get("/{target_id}")
 async def get_user(target_id: str, user_id: str = Depends(require_auth)):
     row = await one(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, last_seen, public_key
+        """SELECT id, username, display_name, avatar_color, about, photo_path, last_seen, public_key, business
              FROM users WHERE id = $1""",
         target_id,
     )

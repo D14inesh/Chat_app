@@ -40,6 +40,27 @@ def _send_one(endpoint: str, p256dh: str, auth: str, payload: str):
     )
 
 
+async def push_to_user(user_id: str, data: dict):
+    """Web Push to every browser/device the user subscribed — also used for
+    new-login alerts. Silently does nothing when VAPID isn't configured."""
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        return
+    subs = await query("SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1", user_id)
+    payload = json.dumps(data)
+
+    async def send(sub: dict):
+        try:
+            await asyncio.to_thread(_send_one, sub["endpoint"], sub["p256dh"], sub["auth"], payload)
+        except WebPushException as err:
+            status_code = err.response.status_code if err.response is not None else None
+            if status_code in (404, 410):
+                await query("DELETE FROM push_subscriptions WHERE id = $1", sub["id"])
+        except Exception as err:  # noqa: BLE001
+            print(f"[push] failed: {err!r}")
+
+    await asyncio.gather(*(send(s) for s in subs))
+
+
 async def deliver_reminder(reminder: dict):
     subs = await query(
         "SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1",

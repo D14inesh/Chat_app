@@ -5,11 +5,43 @@ import re
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from app.core.security import clear_session_cookie, require_auth, set_session_cookie, sign_session
+from app.core.security import (
+    bump_session_epoch, clear_session_cookie, require_auth, session_epoch,
+    set_session_cookie, sign_session,
+)
 from app.core.database import one, query
+from app.utils.devices import client_ip, device_label
 from app.utils.serializers import shape_user
 
 router = APIRouter(prefix="/api/auth")
+
+
+async def record_login(user_id: str, request: Request, method: str = "password"):
+    """Logs a sign-in and alerts the user's other devices: live on every open
+    socket, plus a Web Push notification where they've allowed it."""
+    from app.schedulers.reminders_scheduler import push_to_user
+    from app.websocket import manager as hub
+
+    device = device_label(request)
+    row = await one(
+        """INSERT INTO login_events (user_id, device, ip, method) VALUES ($1, $2, $3, $4)
+           RETURNING id, device, ip, method, created_at""",
+        user_id, device, client_ip(request), method,
+    )
+    event = shape_login(row)
+    await hub.notify_user(user_id, {"type": "login-alert", "login": event})
+    try:
+        await push_to_user(user_id, {
+            "title": "🔐 New login to your account",
+            "body": f"{device} just signed in. If this wasn't you, open Devices and log out all other devices.",
+            "reminderId": f"login-{row['id']}",
+        })
+    except Exception as err:  # noqa: BLE001 — an alert must never block the login itself
+        print(f"[login-alert] push failed: {err!r}")
+
+
+def shape_login(r: dict) -> dict:
+    return {"id": r["id"], "device": r["device"], "ip": r["ip"], "method": r["method"], "createdAt": r["created_at"]}
 
 USERNAME_RE = re.compile(r"^[a-z0-9_.]{3,24}$", re.IGNORECASE)
 
@@ -51,7 +83,8 @@ async def register(request: Request, response: Response):
         username, lower, (display_name or username).strip()[:60], hash_, color, public_key, enc_private_key,
     )
 
-    set_session_cookie(response, sign_session(user["id"]), request)
+    set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
+    await record_login(user["id"], request, "register")
     return {"user": shape_user(user)}
 
 
@@ -76,7 +109,8 @@ async def login(request: Request, response: Response):
         raise HTTPException(401, "Wrong username or password.")
 
     await query("UPDATE users SET last_seen = now() WHERE id = $1", row["id"])
-    set_session_cookie(response, sign_session(row["id"]), request)
+    set_session_cookie(response, sign_session(row["id"], await session_epoch(row["id"])), request)
+    await record_login(row["id"], request, "password")
 
     return {"user": shape_user(row), "encPrivateKey": row["enc_private_key"]}
 
@@ -90,14 +124,41 @@ async def logout(request: Request, response: Response):
 @router.get("/me")
 async def get_me(request: Request, response: Response, uid: str = Depends(require_auth)):
     row = await one(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key
+        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business
              FROM users WHERE id = $1""",
         uid,
     )
     if not row:
         raise HTTPException(401, "Not signed in")
+    user = shape_user(row)
+    user["businessSettings"] = row["business"] or {}
     # Sliding session: both apps call /me every time they start, so renewing
     # the cookie here keeps a user signed in until they log out themselves,
     # instead of being thrown out SESSION_TTL after their original login.
-    set_session_cookie(response, sign_session(uid), request)
-    return {"user": shape_user(row), "encPrivateKey": row["enc_private_key"]}
+    set_session_cookie(response, sign_session(uid, await session_epoch(uid)), request)
+    return {"user": user, "encPrivateKey": row["enc_private_key"]}
+
+
+@router.get("/logins")
+async def recent_logins(uid: str = Depends(require_auth)):
+    """Recent sign-ins for the Devices screen."""
+    rows = await query(
+        """SELECT id, device, ip, method, created_at FROM login_events
+            WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20""",
+        uid,
+    )
+    return {"logins": [shape_login(r) for r in rows]}
+
+
+@router.post("/logout-others")
+async def logout_others(request: Request, response: Response, uid: str = Depends(require_auth)):
+    """Signs out every other device: bumps the session epoch (so every older
+    token stops working), gives THIS device a fresh token, and closes all
+    live connections — this device reconnects at once with its new token,
+    the others are refused and land on the login screen."""
+    from app.websocket import manager as hub
+
+    new_epoch = await bump_session_epoch(uid)
+    set_session_cookie(response, sign_session(uid, new_epoch), request)
+    await hub.close_sessions_older_than(uid, new_epoch)
+    return {"ok": True}

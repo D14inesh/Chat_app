@@ -525,3 +525,93 @@ CREATE TABLE IF NOT EXISTS link_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_link_requests_expiry ON link_requests(expires_at);
+
+-- ═════════════════════════════════════════════════════════════
+-- Polls, pinned messages, disappearing messages, view-once media,
+-- login alerts, quick replies, broadcast lists, business profiles.
+-- Everything below is idempotent and also runs at every backend start
+-- (main.py applies this whole file), so an update needs no manual step.
+-- ═════════════════════════════════════════════════════════════
+
+-- 'poll' messages: the question and options are encrypted like any text;
+-- only the votes (option numbers) are visible to the server, see poll_votes.
+ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check;
+ALTER TABLE messages ADD CONSTRAINT messages_kind_check
+  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll'));
+
+-- view_once  : a photo/video the recipient can open a single time (see
+--              message_opens; the blob download is refused after that).
+-- expires_at : set at send time when the chat has disappearing messages on;
+--              reads filter it out and a sweeper deletes it for good.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS view_once boolean NOT NULL DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_messages_expiry ON messages(expires_at) WHERE expires_at IS NOT NULL;
+
+-- Shared per conversation (everyone sees the same pinned message and the
+-- same disappearing-messages timer), unlike the per-member settings above.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pinned_message_id uuid REFERENCES messages(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pinned_by uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS disappear_seconds integer NOT NULL DEFAULT 0;
+
+-- One row per voter; choices are option indexes into the (encrypted) poll.
+CREATE TABLE IF NOT EXISTS poll_votes (
+  message_id uuid       NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    uuid       NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+  choices    smallint[] NOT NULL,
+  voted_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (message_id, user_id)
+);
+
+-- Who has already opened a view-once message.
+CREATE TABLE IF NOT EXISTS message_opens (
+  message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    uuid NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+  opened_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (message_id, user_id)
+);
+
+-- session_epoch: "Log out all other devices" bumps it; a session token
+-- carrying an older epoch stops working everywhere at once.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS session_epoch integer NOT NULL DEFAULT 0;
+
+-- Business profile — public profile info, same trust tier as `about`.
+--   { enabled, category, description, address, hours, email, website }
+ALTER TABLE users ADD COLUMN IF NOT EXISTS business jsonb;
+
+-- Every sign-in, for "new login" alerts and the Devices list.
+CREATE TABLE IF NOT EXISTS login_events (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device     text NOT NULL,
+  ip         text,
+  method     text NOT NULL DEFAULT 'password',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_login_events_user ON login_events(user_id, created_at DESC);
+
+-- Saved answers inserted with "/shortcut" in the composer. The user's own
+-- templates, stored so they follow them to every device (not chat content).
+CREATE TABLE IF NOT EXISTS quick_replies (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  shortcut   text NOT NULL,
+  body       text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quick_replies_shortcut ON quick_replies(user_id, lower(shortcut));
+
+-- Broadcast lists: one message goes to each member as a normal, separately
+-- encrypted 1:1 message — the list itself is just who to send to.
+CREATE TABLE IF NOT EXISTS broadcast_lists (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_broadcast_lists_user ON broadcast_lists(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS broadcast_list_members (
+  list_id   uuid NOT NULL REFERENCES broadcast_lists(id) ON DELETE CASCADE,
+  member_id uuid NOT NULL REFERENCES users(id)           ON DELETE CASCADE,
+  PRIMARY KEY (list_id, member_id)
+);

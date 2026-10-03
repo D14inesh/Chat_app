@@ -18,13 +18,29 @@ from datetime import datetime, timezone
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from app.core.security import COOKIE_NAME, verify_session
+from app.core.security import COOKIE_NAME, verify_session_live
 from app.core.database import is_blocked_either_way, one, query, transaction
 from app.utils.serializers import shape_message
 
 # userId -> set[WebSocket] — a Set, not a single socket, so the same account
 # open in several tabs/devices at once gets every event.
 sockets: dict[str, set[WebSocket]] = {}
+
+# The session epoch each socket signed in with — "log out other devices"
+# closes every socket older than the new epoch (see close_sessions_older_than).
+socket_epochs: dict[WebSocket, int] = {}
+
+# Disappearing-message timers a chat can be set to (seconds): off, 24 hours,
+# 7 days, 90 days — the same choices WhatsApp offers.
+DISAPPEAR_CHOICES = {0, 86400, 604800, 7776000}
+MAX_POLL_OPTIONS = 12
+
+# A new message's expiry follows the chat's disappearing-messages timer at
+# the moment it's sent ($1 is the conversation id in every insert using it).
+_EXPIRES_SQL = """(SELECT CASE WHEN disappear_seconds > 0
+                               THEN now() + make_interval(secs => disappear_seconds) END
+                     FROM conversations WHERE id = $1)"""
+_MESSAGE_COLUMNS = "id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id, view_once, expires_at"
 
 # conversationId -> {userId: WebSocket} — group call seat map. Guarded by
 # _group_call_lock (see on_group_call_join) so the "who's here / evict my
@@ -91,15 +107,28 @@ async def notify_user(user_id: str, obj: dict):
     await fanout(user_id, obj)
 
 
+async def close_sessions_older_than(user_id: str, epoch: int):
+    """Closes the user's sockets that signed in before `epoch` (code 4001 =
+    signed out). The device that asked reconnects with its new token."""
+    for ws in list(sockets.get(user_id, ())):
+        if socket_epochs.get(ws, 0) < epoch:
+            try:
+                await ws.close(code=4001, reason="Signed out from another device")
+            except Exception:  # noqa: BLE001
+                pass
+
+
 async def handle_connection(websocket: WebSocket):
     token = websocket.cookies.get(COOKIE_NAME)
-    user_id = verify_session(token)
+    live = await verify_session_live(token)
 
-    if not user_id:
+    if not live:
         await websocket.close(code=4001, reason="Not signed in")
         return
+    user_id, epoch = live
 
     await websocket.accept()
+    socket_epochs[websocket] = epoch
     sockets.setdefault(user_id, set()).add(websocket)
 
     # First socket for this user = they just came online.
@@ -127,6 +156,7 @@ async def handle_connection(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        socket_epochs.pop(websocket, None)
         await leave_all_group_call_rooms(websocket, user_id)
 
         conns = sockets.get(user_id)
@@ -179,6 +209,14 @@ async def dispatch(ws: WebSocket, user_id: str, msg: dict):
         return await relay_group_call_frame(ws, user_id, msg, "group-call-ice")
     if t == "game-signal":
         return await on_game_signal(ws, user_id, msg)
+    if t == "poll-vote":
+        return await on_poll_vote(ws, user_id, msg)
+    if t == "pin-message":
+        return await on_pin_message(ws, user_id, msg)
+    if t == "set-disappearing":
+        return await on_set_disappearing(ws, user_id, msg)
+    if t == "view-once-opened":
+        return await on_view_once_opened(ws, user_id, msg)
     if t == "ping":
         return await send(ws, {"type": "pong"})
     return await send(ws, {"type": "error", "error": f"Unknown type: {t}"})
@@ -193,10 +231,12 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
     file_size = msg.get("fileSize")
     temp_id = msg.get("tempId")
     reply_to_id = msg.get("replyToId")
+    # View-once only makes sense for a photo/video attachment.
+    view_once = bool(msg.get("viewOnce")) and kind == "file"
 
     if not conversation_id or not ciphertext or not iv:
         return await send(ws, {"type": "error", "error": "Missing message fields", "tempId": temp_id})
-    if kind not in ("text", "file", "voice", "location", "contact"):
+    if kind not in ("text", "file", "voice", "location", "contact", "poll"):
         return await send(ws, {"type": "error", "error": "Bad message kind", "tempId": temp_id})
 
     ctx = await conversation_context(conversation_id)
@@ -221,10 +261,11 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
 
     async with transaction() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO messages (conversation_id, sender_id, kind, ciphertext, iv, file_path, file_size, reply_to_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id""",
-            conversation_id, user_id, kind, ciphertext, iv, file_path, file_size, valid_reply_to_id,
+            f"""INSERT INTO messages (conversation_id, sender_id, kind, ciphertext, iv, file_path, file_size,
+                                      reply_to_id, view_once, expires_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, {_EXPIRES_SQL})
+               RETURNING {_MESSAGE_COLUMNS}""",
+            conversation_id, user_id, kind, ciphertext, iv, file_path, file_size, valid_reply_to_id, view_once,
         )
         row = dict(row)
         for rid in recipients:
@@ -362,6 +403,133 @@ async def on_edit_message(ws: WebSocket, user_id: str, msg: dict):
             "type": "message-edited", "conversationId": conversation_id, "messageId": message_id,
             "ciphertext": ciphertext, "iv": iv, "editedAt": updated["edited_at"],
         })
+
+
+async def _message_in(conversation_id: str, message_id: str) -> dict | None:
+    """A live (not deleted, not expired) message of this conversation."""
+    return await one(
+        f"""SELECT {_MESSAGE_COLUMNS}, edited_at FROM messages
+             WHERE id = $1 AND conversation_id = $2 AND deleted_at IS NULL
+               AND (expires_at IS NULL OR expires_at > now())""",
+        message_id, conversation_id,
+    )
+
+
+async def poll_votes(message_id: str) -> list[dict]:
+    rows = await query("SELECT user_id, choices FROM poll_votes WHERE message_id = $1 ORDER BY voted_at", message_id)
+    return [{"userId": r["user_id"], "choices": list(r["choices"])} for r in rows]
+
+
+async def on_poll_vote(ws: WebSocket, user_id: str, msg: dict):
+    """Vote (or change/retract a vote — empty choices) on a poll. The server
+    only ever sees option numbers; the question and options stay encrypted."""
+    conversation_id = msg.get("conversationId")
+    message_id = msg.get("messageId")
+    choices = msg.get("choices")
+    if not conversation_id or not message_id or not isinstance(choices, list):
+        return
+    ctx = await conversation_context(conversation_id)
+    if not ctx or user_id not in ctx["memberIds"]:
+        return
+    if blocked_by_pending_request(ctx, user_id):
+        return await send(ws, {"type": "error", "error": "Accept the request before you can vote."})
+    target = await _message_in(conversation_id, message_id)
+    if not target or target["kind"] != "poll":
+        return
+    try:
+        picked = sorted({int(c) for c in choices})
+    except (TypeError, ValueError):
+        return
+    if any(c < 0 or c >= MAX_POLL_OPTIONS for c in picked):
+        return
+
+    if picked:
+        await query(
+            """INSERT INTO poll_votes (message_id, user_id, choices) VALUES ($1, $2, $3)
+               ON CONFLICT (message_id, user_id) DO UPDATE SET choices = EXCLUDED.choices, voted_at = now()""",
+            message_id, user_id, picked,
+        )
+    else:
+        await query("DELETE FROM poll_votes WHERE message_id = $1 AND user_id = $2", message_id, user_id)
+
+    votes = await poll_votes(message_id)
+    for rid in ctx["memberIds"]:
+        await fanout(rid, {"type": "poll-votes", "conversationId": conversation_id, "messageId": message_id, "votes": votes})
+
+
+async def on_pin_message(ws: WebSocket, user_id: str, msg: dict):
+    """Pin a message to the top of the chat for everyone (messageId null =
+    unpin). One pinned message per chat; pinning another replaces it."""
+    conversation_id = msg.get("conversationId")
+    message_id = msg.get("messageId")
+    if not conversation_id:
+        return
+    ctx = await conversation_context(conversation_id)
+    if not ctx or user_id not in ctx["memberIds"]:
+        return
+    if blocked_by_pending_request(ctx, user_id):
+        return await send(ws, {"type": "error", "error": "Accept the request before you can pin messages."})
+
+    pinned = None
+    if message_id:
+        target = await _message_in(conversation_id, message_id)
+        if not target:
+            return await send(ws, {"type": "error", "error": "That message can't be pinned."})
+        pinned = shape_message(target)
+    await query(
+        "UPDATE conversations SET pinned_message_id = $2, pinned_by = $3 WHERE id = $1",
+        conversation_id, message_id or None, user_id if message_id else None,
+    )
+    for rid in ctx["memberIds"]:
+        await fanout(rid, {
+            "type": "message-pinned", "conversationId": conversation_id,
+            "message": pinned, "pinnedBy": user_id if pinned else None,
+        })
+
+
+async def on_set_disappearing(ws: WebSocket, user_id: str, msg: dict):
+    """Turn disappearing messages on/off for everyone in the chat. Applies to
+    messages sent from now on (like WhatsApp), not to older ones."""
+    conversation_id = msg.get("conversationId")
+    try:
+        seconds = int(msg.get("seconds") or 0)
+    except (TypeError, ValueError):
+        return
+    if not conversation_id or seconds not in DISAPPEAR_CHOICES:
+        return
+    ctx = await conversation_context(conversation_id)
+    if not ctx or user_id not in ctx["memberIds"]:
+        return
+    if blocked_by_pending_request(ctx, user_id):
+        return await send(ws, {"type": "error", "error": "Accept the request first."})
+
+    await query("UPDATE conversations SET disappear_seconds = $2 WHERE id = $1", conversation_id, seconds)
+    for rid in ctx["memberIds"]:
+        await fanout(rid, {
+            "type": "disappearing-changed", "conversationId": conversation_id,
+            "seconds": seconds, "byUserId": user_id,
+        })
+
+
+async def on_view_once_opened(ws: WebSocket, user_id: str, msg: dict):
+    """A recipient opened a view-once photo/video: remembered so the file is
+    never handed to them again, and the sender sees "Opened"."""
+    conversation_id = msg.get("conversationId")
+    message_id = msg.get("messageId")
+    if not conversation_id or not message_id:
+        return
+    members = await member_ids(conversation_id)
+    if user_id not in members:
+        return
+    target = await _message_in(conversation_id, message_id)
+    if not target or not target["view_once"] or target["sender_id"] == user_id:
+        return
+    await query(
+        "INSERT INTO message_opens (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        message_id, user_id,
+    )
+    for rid in members:
+        await fanout(rid, {"type": "view-once-opened", "conversationId": conversation_id, "messageId": message_id, "userId": user_id})
 
 
 async def flush_pending_deliveries(user_id: str):
@@ -622,9 +790,9 @@ async def deliver_scheduled_message(conversation_id: str, sender_id: str, cipher
 
     async with transaction() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO messages (conversation_id, sender_id, kind, ciphertext, iv)
-               VALUES ($1, $2, 'text', $3, $4)
-               RETURNING id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id""",
+            f"""INSERT INTO messages (conversation_id, sender_id, kind, ciphertext, iv, expires_at)
+               VALUES ($1, $2, 'text', $3, $4, {_EXPIRES_SQL})
+               RETURNING {_MESSAGE_COLUMNS}""",
             conversation_id, sender_id, ciphertext, iv,
         )
         row = dict(row)

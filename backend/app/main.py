@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core import database as db
-from app.core.config import CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_PORT, PORT, UPLOAD_DIR
+from app.core.config import CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_PORT, PORT, PROJECT_DIR, UPLOAD_DIR
 from app.core.database import close_pool, init_pool
 from app.schedulers.reminders_scheduler import run_reminder_scheduler
 from app.schedulers.scheduled_messages_scheduler import run_scheduled_messages_poller
@@ -34,6 +34,33 @@ async def _status_sweep_loop():
             await db.pool.execute("DELETE FROM statuses WHERE expires_at <= now()")
         except Exception as err:  # noqa: BLE001
             print(f"[status-sweep] {err!r}")
+
+
+EXPIRY_SWEEP_S = 60  # disappearing messages: reads already hide expired rows
+
+
+async def _expiry_sweep_loop():
+    """Deletes disappearing messages (and their encrypted files) for good
+    once they expire — reads filter them out before this runs anyway."""
+    while True:
+        await asyncio.sleep(EXPIRY_SWEEP_S)
+        try:
+            rows = await db.pool.fetch(
+                "DELETE FROM messages WHERE expires_at <= now() RETURNING file_path"
+            )
+            for r in rows:
+                if r["file_path"]:
+                    (Path(UPLOAD_DIR) / Path(r["file_path"]).name).unlink(missing_ok=True)
+        except Exception as err:  # noqa: BLE001
+            print(f"[expiry-sweep] {err!r}")
+
+
+async def _apply_schema_file():
+    """Runs database/postgres/schema.sql — every statement in it is
+    idempotent, so new tables/columns arrive with a plain restart."""
+    sql_file = PROJECT_DIR / "database" / "postgres" / "schema.sql"
+    if sql_file.exists():
+        await db.pool.execute(sql_file.read_text(encoding="utf-8"))
 
 
 async def _schema_top_up():
@@ -87,10 +114,15 @@ async def lifespan(app: FastAPI):
         await _schema_top_up()
     except Exception as err:  # noqa: BLE001
         print(f"[migrate] schema top-up failed: {err!r}")
+    try:
+        await _apply_schema_file()
+    except Exception as err:  # noqa: BLE001
+        print(f"[migrate] schema.sql failed: {err!r}")
 
     _background_tasks.append(asyncio.create_task(run_reminder_scheduler()))
     _background_tasks.append(asyncio.create_task(run_scheduled_messages_poller()))
     _background_tasks.append(asyncio.create_task(_status_sweep_loop()))
+    _background_tasks.append(asyncio.create_task(_expiry_sweep_loop()))
 
     yield
 

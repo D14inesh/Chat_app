@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from app.core.security import require_auth
 from app.core.config import MAX_UPLOAD_BYTES, UPLOAD_DIR
+from app.core.database import one
 
 router = APIRouter(prefix="/api/upload", dependencies=[Depends(require_auth)])
 
@@ -32,7 +33,7 @@ async def upload_blob(blob: UploadFile = File(...)):
 
 
 @router.get("/{name}")
-async def download_blob(name: str):
+async def download_blob(name: str, user_id: str = Depends(require_auth)):
     # os.path.basename strips any ../ traversal attempt, same as path.basename in Node.
     safe_name = os.path.basename(name)
     if not NAME_RE.match(safe_name):
@@ -41,5 +42,16 @@ async def download_blob(name: str):
     full = Path(UPLOAD_DIR) / safe_name
     if not full.exists():
         raise HTTPException(404, "Not found.")
+
+    # A view-once photo/video is handed to each recipient only until they've
+    # opened it once — after that the server refuses to send it again.
+    opened = await one(
+        """SELECT 1 FROM messages m
+             JOIN message_opens o ON o.message_id = m.id AND o.user_id = $2
+            WHERE m.file_path = $1 AND m.view_once""",
+        safe_name, user_id,
+    )
+    if opened:
+        raise HTTPException(410, "This view-once message was already opened.")
 
     return FileResponse(full, media_type="application/octet-stream")

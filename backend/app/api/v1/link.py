@@ -11,7 +11,7 @@ import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.core.security import require_auth, set_session_cookie, sign_session
+from app.core.security import require_auth, session_epoch, set_session_cookie, sign_session
 from app.core.database import execute, one, query, row_count
 from app.utils.serializers import shape_user
 
@@ -163,7 +163,9 @@ async def poll_link(request: Request, response: Response):
     await query("UPDATE link_requests SET status = 'used' WHERE code = $1", code)
     await query("UPDATE users SET last_seen = now() WHERE id = $1", user["id"])
 
-    set_session_cookie(response, sign_session(user["id"]), request)
+    set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
+    from app.api.v1.auth import record_login
+    await record_login(user["id"], request, "qr")
     return {
         "status": "ready",
         "wrappedKey": row["wrapped_key"],

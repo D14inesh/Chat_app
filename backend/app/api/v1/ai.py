@@ -77,3 +77,102 @@ async def send_ai_message(request: Request, user_id: str = Depends(require_auth)
     )
 
     return {"userMessage": shape(user_row), "assistantMessage": shape(assistant_row)}
+
+
+# ─────────────────────────────────────────────────────────────
+# One-shot helpers on chat text: summarize, translate, smart replies.
+# The browser/app decrypts the messages itself and sends ONLY the text the
+# user asked about — nothing is stored, and the UI says plainly that this
+# text goes to the server's AI (it can't stay end-to-end encrypted).
+# ─────────────────────────────────────────────────────────────
+MAX_LINES = 150
+MAX_CHARS = 12000
+
+
+async def _ask(system: str, user: str, timeout: int = 90) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.post(OLLAMA_URL, json={
+                "model": OLLAMA_MODEL, "stream": False,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            })
+    except httpx.RequestError:
+        raise HTTPException(502, "The AI isn't reachable right now. Is Ollama running on the server?")
+    try:
+        content = res.json().get("message", {}).get("content")
+    except ValueError:
+        content = None
+    if res.status_code != 200 or not content:
+        raise HTTPException(502, "The AI couldn't answer that right now.")
+    return content.strip()
+
+
+def _transcript(body: dict) -> str:
+    lines = body.get("lines")
+    if not isinstance(lines, list) or not lines:
+        raise HTTPException(400, "Nothing to work with.")
+    out = []
+    for item in lines[-MAX_LINES:]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "Someone")[:40]
+        text = str(item.get("text") or "").strip()
+        if text:
+            out.append(f"{name}: {text}")
+    text = "\n".join(out)[-MAX_CHARS:]
+    if not text:
+        raise HTTPException(400, "Nothing to work with.")
+    return text
+
+
+@router.post("/summarize")
+async def summarize(request: Request):
+    body = await request.json()
+    transcript = _transcript(body)
+    summary = await _ask(
+        "You summarize chat conversations. Reply with a short summary: 3 to 6 bullet points "
+        "starting with '• ', covering decisions, questions, plans, dates and who said what that matters. "
+        "Be factual, use the same language as the chat, no introduction line.",
+        transcript,
+    )
+    return {"summary": summary}
+
+
+LANGUAGES = {
+    "en": "English", "ta": "Tamil", "hi": "Hindi", "te": "Telugu", "ml": "Malayalam", "kn": "Kannada",
+    "ar": "Arabic", "fr": "French", "es": "Spanish", "de": "German", "zh": "Chinese", "ja": "Japanese",
+}
+
+
+@router.post("/translate")
+async def translate(request: Request):
+    body = await request.json()
+    text = str(body.get("text") or "").strip()[:4000]
+    target = LANGUAGES.get(str(body.get("to") or "en"), "English")
+    if not text:
+        raise HTTPException(400, "Nothing to translate.")
+    result = await _ask(
+        f"Translate the user's message into {target}. Reply with the translation only — "
+        "no quotes, no notes, no explanation. Keep emojis, names and numbers as they are.",
+        text, timeout=60,
+    )
+    return {"translation": result, "to": target}
+
+
+@router.post("/replies")
+async def smart_replies(request: Request):
+    body = await request.json()
+    transcript = _transcript(body)
+    me = str(body.get("me") or "Me")[:40]
+    raw = await _ask(
+        f"You suggest replies for {me} in a chat. Read the conversation and give exactly 3 short, "
+        f"natural replies {me} could send next (each under 12 words, different in tone: e.g. agree, ask, decline). "
+        "Use the chat's language. Output only the 3 replies, one per line, no numbering, no quotes.",
+        transcript, timeout=60,
+    )
+    replies = []
+    for line in raw.splitlines():
+        line = line.strip().lstrip("-•*0123456789.) ").strip().strip('"').strip()
+        if line and line not in replies:
+            replies.append(line[:120])
+    return {"replies": replies[:3]}

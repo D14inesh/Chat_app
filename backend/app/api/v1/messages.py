@@ -51,6 +51,7 @@ async def starred_messages(user_id: str = Depends(require_auth)):
              FROM message_stars ms
              JOIN messages m ON m.id = ms.message_id
             WHERE ms.user_id = $1 AND m.deleted_at IS NULL
+              AND (m.expires_at IS NULL OR m.expires_at > now())
             ORDER BY ms.created_at DESC""",
         user_id,
     )

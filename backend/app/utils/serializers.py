@@ -20,6 +20,9 @@ def shape_conversation(r: dict) -> dict:
         ),
         "wallpaperFit": r.get("wallpaper_fit") or "cover",
         "muted": bool(r.get("muted")),
+        "disappearSeconds": int(r.get("disappear_seconds") or 0),
+        "pinnedMessage": r.get("pinned_message"),
+        "pinnedBy": r.get("pinned_by"),
         "lastMessage": (
             {
                 "id": r["last_id"],
@@ -30,6 +33,7 @@ def shape_conversation(r: dict) -> dict:
                 "createdAt": r["last_at"],
                 "deliveredAt": r["last_delivered"],
                 "readAt": r["last_read"],
+                "viewOnce": bool(r.get("last_view_once")),
             }
             if r.get("last_id")
             else None
@@ -61,7 +65,8 @@ def shape_conversation(r: dict) -> dict:
     }
 
 
-def shape_message(r: dict, reactions: list | None = None) -> dict:
+def shape_message(r: dict, reactions: list | None = None, votes: list | None = None,
+                  opened_by: list | None = None) -> dict:
     return {
         "id": r["id"],
         "senderId": r["sender_id"],
@@ -76,6 +81,13 @@ def shape_message(r: dict, reactions: list | None = None) -> dict:
         "editedAt": r.get("edited_at"),
         "replyToId": r.get("reply_to_id"),
         "reactions": reactions or [],
+        # Polls: [{userId, choices: [optionIndex, ...]}]
+        "votes": votes or [],
+        # View-once media: who has already opened it.
+        "viewOnce": bool(r.get("view_once")),
+        "openedBy": opened_by or [],
+        # Disappearing messages: when it vanishes (null = never).
+        "expiresAt": r.get("expires_at"),
     }
 
 
@@ -96,4 +108,15 @@ def shape_user(r: dict) -> dict:
         "publicKey": r.get("public_key"),
         "lastSeen": r.get("last_seen"),
         "appearance": appearance,
+        "business": shape_business(r.get("business")),
     }
+
+
+BUSINESS_FIELDS = ("category", "description", "address", "hours", "email", "website")
+
+
+def shape_business(b: dict | None) -> dict | None:
+    """Only an enabled business profile is shown to anyone."""
+    if not b or not b.get("enabled"):
+        return None
+    return {"enabled": True, **{k: b.get(k) or "" for k in BUSINESS_FIELDS}}
