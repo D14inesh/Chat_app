@@ -859,12 +859,20 @@ button { cursor: pointer; border: none; background: none; }
 .sidebar {
   background: var(--panel);
   border-right: var(--side-divider);
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  /* A column, not a fixed set of grid rows: the sidebar holds a varying
+     number of rows (header, select bar, status tray, search, filter chips,
+     list) and some hide themselves. With "auto auto 1fr" the filter chips
+     fell into the 1fr row whenever the status tray was empty and stretched
+     into giant pills. Here only the chat list takes the spare height. */
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   backdrop-filter: var(--glass-blur, none);
   -webkit-backdrop-filter: var(--glass-blur, none);
 }
+
+.sidebar > * { flex: none; }
+.sidebar > .chat-list { flex: 1 1 0; }
 
 .sidebar-head {
   display: flex;
