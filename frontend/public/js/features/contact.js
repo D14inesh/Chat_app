@@ -110,7 +110,11 @@ export function openContactPanel({ blocking = false } = {}) {
   if (!blocking) box.addEventListener('click', (e) => { if (e.target === box) box.remove(); });
 
   const errEl = box.querySelector('#contact-error');
-  const showError = (msg) => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
+  const showError = (msg) => {
+    errEl.textContent = msg;
+    errEl.classList.remove('hidden');
+    errEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
   const read = wireContactFields(box, '/api/auth/contact/otp', showError);
 
   box.querySelector('#contact-cancel')?.addEventListener('click', () => box.remove());

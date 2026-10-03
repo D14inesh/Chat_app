@@ -268,6 +268,8 @@ function showAuthError(msg) {
   const el = $('auth-error');
   el.textContent = msg;
   el.classList.remove('hidden');
+  // The sign-up form is taller than the screen — bring the message into view.
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 function hideAuthError() {

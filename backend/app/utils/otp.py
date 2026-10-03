@@ -62,7 +62,8 @@ async def ensure_contact_free(phone: str, email: str, except_user: str | None = 
     )
     if row:
         what = "mobile number" if row["phone_hit"] else "email"
-        raise HTTPException(409, f"That {what} is already used by another account. One account per {what}.")
+        raise HTTPException(409, f"This {what} already has an account — one account per {what}. "
+                                 f"If it's yours, sign in instead (you can use the {what} to sign in).")
 
 
 def _hash(email: str, code: str) -> str:
