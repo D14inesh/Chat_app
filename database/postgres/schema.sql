@@ -629,3 +629,27 @@ CREATE TABLE IF NOT EXISTS broadcast_list_members (
   member_id uuid NOT NULL REFERENCES users(id)           ON DELETE CASCADE,
   PRIMARY KEY (list_id, member_id)
 );
+
+-- Verified contact: every account has a mobile number and an email
+-- (Gmail), each usable by only one account. The email is proven with a
+-- one-time code sent to it; see email_otps.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS users_phone_key ON users(phone) WHERE phone IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users(lower(email)) WHERE email IS NOT NULL;
+
+-- 6-digit codes emailed for sign-up / adding a number+email to an existing
+-- account. Only a hash is kept; 10 minutes, 5 tries, single use.
+CREATE TABLE IF NOT EXISTS email_otps (
+  id         bigserial PRIMARY KEY,
+  email      text NOT NULL,
+  phone      text NOT NULL,
+  purpose    text NOT NULL,
+  code_hash  text NOT NULL,
+  attempts   int  NOT NULL DEFAULT 0,
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_email_otps_email ON email_otps(lower(email), created_at DESC);

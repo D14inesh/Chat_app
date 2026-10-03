@@ -3,6 +3,7 @@ import asyncio
 import random
 import re
 
+import asyncpg
 import bcrypt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
@@ -14,6 +15,7 @@ from app.core.database import one, query
 from app.utils.devices import (
     bind_device, client_ip, device_id, device_label, device_owner, device_taken_message,
 )
+from app.utils.otp import check_code, ensure_contact_free, normalize_phone, read_contact, send_code
 from app.utils.serializers import shape_user
 
 router = APIRouter(prefix="/api/auth")
@@ -81,21 +83,30 @@ async def register(request: Request, response: Response):
     if taken:
         raise HTTPException(409, "That username is already taken.")
 
+    # One account per mobile number and per email; the email code proves the Gmail.
+    phone, email = read_contact(body)
+    await ensure_contact_free(phone, email)
+    await check_code(phone, email, "register", body.get("otp"))
+
     hash_ = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
     color = random.choice(AVATAR_COLORS)
 
-    user = await one(
-        """INSERT INTO users (username, username_lower, display_name, password_hash,
-                              avatar_color, public_key, enc_private_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, username, display_name, avatar_color, about, appearance""",
-        username, lower, (display_name or username).strip()[:60], hash_, color, public_key, enc_private_key,
-    )
+    try:
+        user = await one(
+            """INSERT INTO users (username, username_lower, display_name, password_hash,
+                                  avatar_color, public_key, enc_private_key, phone, email, email_verified_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+               RETURNING id, username, display_name, avatar_color, about, appearance""",
+            username, lower, (display_name or username).strip()[:60], hash_, color, public_key, enc_private_key,
+            phone, email,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(409, "That username, mobile number or email was just taken.")
 
     await bind_device(dev, user["id"], device_label(request))
     set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
     await record_login(user["id"], request, "register")
-    return {"user": shape_user(user)}
+    return {"user": with_contact(shape_user(user), {"phone": phone, "email": email, "email_verified_at": True})}
 
 
 @router.post("/login")
@@ -104,11 +115,14 @@ async def login(request: Request, response: Response):
     username = body.get("username")
     password = body.get("password")
 
+    # Sign in with username, mobile number or email.
+    ident = str(username or "").strip().lower()
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance,
-                  password_hash, enc_private_key
-             FROM users WHERE username_lower = $1""",
-        str(username or "").lower(),
+                  password_hash, enc_private_key, phone, email, email_verified_at
+             FROM users WHERE username_lower = $1 OR phone = $2 OR lower(email) = $1
+            ORDER BY (username_lower = $1) DESC LIMIT 1""",
+        ident, normalize_phone(ident) or "",
     )
 
     # Same message, and the compare only runs when a row exists — mirrors
@@ -116,7 +130,7 @@ async def login(request: Request, response: Response):
     # (preserved as-is here rather than "fixed", per the plan's parity goal).
     ok = row and bcrypt.checkpw(str(password or "").encode(), row["password_hash"].encode())
     if not ok:
-        raise HTTPException(401, "Wrong username or password.")
+        raise HTTPException(401, "Wrong username, number, email or password.")
 
     # One account per device: this device may only sign in as its owner.
     dev = device_id(request, response)
@@ -129,7 +143,16 @@ async def login(request: Request, response: Response):
     set_session_cookie(response, sign_session(row["id"], await session_epoch(row["id"])), request)
     await record_login(row["id"], request, "password")
 
-    return {"user": shape_user(row), "encPrivateKey": row["enc_private_key"]}
+    return {"user": with_contact(shape_user(row), row), "encPrivateKey": row["enc_private_key"]}
+
+
+def with_contact(user: dict, row: dict) -> dict:
+    """My own number/email — only ever on my own profile, never in
+    shape_user, which other people see."""
+    user["phone"] = row.get("phone")
+    user["email"] = row.get("email")
+    user["contactVerified"] = bool(row.get("phone") and row.get("email_verified_at"))
+    return user
 
 
 @router.post("/logout")
@@ -141,7 +164,8 @@ async def logout(request: Request, response: Response):
 @router.get("/me")
 async def get_me(request: Request, response: Response, uid: str = Depends(require_auth)):
     row = await one(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business
+        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business,
+                  phone, email, email_verified_at
              FROM users WHERE id = $1""",
         uid,
     )
@@ -160,11 +184,44 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
     user = shape_user(row)
     user["businessSettings"] = row["business"] or {}
     user["deviceLocked"] = bool(dev)
+    with_contact(user, row)
     # Sliding session: both apps call /me every time they start, so renewing
     # the cookie here keeps a user signed in until they log out themselves,
     # instead of being thrown out SESSION_TTL after their original login.
     set_session_cookie(response, sign_session(uid, await session_epoch(uid)), request)
     return {"user": user, "encPrivateKey": row["enc_private_key"]}
+
+
+@router.post("/otp")
+async def send_signup_code(request: Request):
+    """Sign-up step 1: emails a code for this mobile number + email."""
+    body = await request.json()
+    phone, email = read_contact(body)
+    await ensure_contact_free(phone, email)
+    return await send_code(phone, email, "register")
+
+
+@router.post("/contact/otp")
+async def send_contact_code(request: Request, uid: str = Depends(require_auth)):
+    """Accounts made before verification: email a code to add number + email."""
+    body = await request.json()
+    phone, email = read_contact(body)
+    await ensure_contact_free(phone, email, except_user=uid)
+    return await send_code(phone, email, "contact")
+
+
+@router.post("/contact")
+async def save_contact(request: Request, uid: str = Depends(require_auth)):
+    body = await request.json()
+    phone, email = read_contact(body)
+    await ensure_contact_free(phone, email, except_user=uid)
+    await check_code(phone, email, "contact", body.get("otp"))
+    try:
+        await query("UPDATE users SET phone = $2, email = $3, email_verified_at = now() WHERE id = $1",
+                    uid, phone, email)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(409, "That mobile number or email was just taken by another account.")
+    return {"phone": phone, "email": email, "contactVerified": True}
 
 
 @router.post("/device/release")

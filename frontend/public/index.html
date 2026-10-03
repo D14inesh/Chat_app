@@ -113,7 +113,7 @@
 
     <form id="auth-form">
       <div class="field">
-        <label for="f-username">Username</label>
+        <label for="f-username" id="f-username-label">Username, mobile or Gmail</label>
         <input id="f-username" name="username" autocomplete="username"
                placeholder="ravi_kumar" required>
       </div>
@@ -129,6 +129,9 @@
         <input id="f-password" name="password" type="password"
                autocomplete="current-password" placeholder="••••••••" required>
       </div>
+
+      <!-- Mobile number, Gmail and the emailed code (filled in by js/features/contact.js) -->
+      <div class="hidden" id="field-contact"></div>
 
       <button type="submit" class="btn-primary" id="auth-submit">Sign in</button>
     </form>

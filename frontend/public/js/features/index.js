@@ -43,3 +43,4 @@ export function handleFeatureFrame(frame) {
     default: return false;
   }
 }
+export { contactFieldsHtml, wireContactFields, openContactPanel, ensureContact } from './contact.js';

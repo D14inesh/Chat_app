@@ -252,6 +252,11 @@ function setAuthMode(mode) {
     : 'Private messaging, end to end.';
   $('auth-submit').textContent = isRegister ? 'Create account' : 'Sign in';
   $('field-display').classList.toggle('hidden', !isRegister);
+  $('field-contact').classList.toggle('hidden', !isRegister);
+  // Hidden required fields would block "Sign in" — disabled ones aren't checked.
+  $('field-contact').querySelectorAll('input').forEach((i) => { i.disabled = !isRegister; });
+  $('f-username-label').textContent = isRegister ? 'Username' : 'Username, mobile or Gmail';
+  $('f-username').placeholder = isRegister ? 'ravi_kumar' : 'ravi_kumar or 98765 43210';
   $('auth-toggle').querySelector('span').textContent =
     isRegister ? 'Already have an account?' : 'New here?';
   $('toggle-mode').textContent = isRegister ? 'Sign in' : 'Create an account';
@@ -287,6 +292,8 @@ $('auth-form').addEventListener('submit', async (e) => {
 
   try {
     if (authMode === 'register') {
+      const contact = readSignupContact();
+      if (!contact.otp) throw new Error('Tap “Send code”, then enter the 6-digit code from your Gmail.');
       btn.textContent = 'Generating keys…';
 
       // Key generation and PBKDF2 wrapping both happen here, in the browser.
@@ -298,7 +305,7 @@ $('auth-form').addEventListener('submit', async (e) => {
       btn.textContent = 'Creating account…';
       const { user } = await api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ username, displayName, password, publicKey, encPrivateKey }),
+        body: JSON.stringify({ username, displayName, password, publicKey, encPrivateKey, ...contact }),
       });
 
       state.privateKey = keyPair.privateKey;
@@ -772,6 +779,7 @@ async function enterApp(user) {
   F.loadQuickReplies();    // "/" shortcuts in the composer (background)
   F.startExpiryWatcher();  // hides disappearing messages the moment they expire
   connectSocket();         // its 'open' handler flushes the outbox
+  F.ensureContact(user);   // older accounts: add a mobile number + Gmail once
 
   // Resume "Hey ARM" if it was on before — mirrors how a real assistant
   // stays armed across app launches once you've turned it on once. If the
@@ -10108,6 +10116,10 @@ F.bindFeatures({
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
 });
+
+// Sign-up form: mobile number + Gmail + emailed code.
+$('field-contact').innerHTML = F.contactFieldsHtml();
+const readSignupContact = F.wireContactFields($('field-contact'), '/api/auth/otp', showAuthError);
 
 setAuthMode('login');
 gateAppLock().then(tryResume);

@@ -79,3 +79,15 @@ PG = {
     "password": os.environ.get("PGPASSWORD", ""),
     "database": os.environ.get("PGDATABASE", "vesper_chat"),
 }
+
+# Sign-up codes — emailed through any SMTP account. For Gmail: turn on
+# 2-step verification, create an App Password (myaccount.google.com →
+# Security → App passwords) and put it in SMTP_PASS.
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+MAIL_FROM = os.environ.get("MAIL_FROM", "") or SMTP_USER
+# Local testing without email: the code is returned to the app and shown
+# on screen. Never turn this on for the real server.
+OTP_DEV_MODE = os.environ.get("OTP_DEV_MODE", "").strip().lower() in ("1", "true", "yes")

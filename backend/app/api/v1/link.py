@@ -151,7 +151,8 @@ async def poll_link(request: Request, response: Response):
         return {"status": "pending"}
 
     user = await one(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, public_key
+        """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, public_key,
+                  phone, email, email_verified_at
              FROM users WHERE id = $1""",
         row["user_id"],
     )
@@ -173,14 +174,14 @@ async def poll_link(request: Request, response: Response):
     await query("UPDATE users SET last_seen = now() WHERE id = $1", user["id"])
 
     set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
-    from app.api.v1.auth import record_login
+    from app.api.v1.auth import record_login, with_contact
     await record_login(user["id"], request, "qr")
     return {
         "status": "ready",
         "wrappedKey": row["wrapped_key"],
         "wrappedIv": row["wrapped_iv"],
         "publicKey": user["public_key"],
-        "user": shape_user(user),
+        "user": with_contact(shape_user(user), user),
     }
 
 

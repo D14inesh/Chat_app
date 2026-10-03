@@ -3,6 +3,7 @@
 // one-tap "Log out all other devices".
 
 import { app, icon, openModal, whenText } from './core.js';
+import { openContactPanel } from './contact.js';
 
 const METHOD_LABEL = { password: 'Password', qr: 'QR code (linked device)', register: 'New account' };
 
@@ -37,6 +38,14 @@ export async function openSecurityPanel() {
       <h3>Security &amp; logins</h3>
       <p>Every sign-in to your account. You get an alert on your other devices each time.</p>
     </div>
+    <div class="contact-summary">
+      <div class="login-row-icon">${icon('mail')}</div>
+      <div class="login-row-body">
+        <div class="login-row-device">${app.escapeHtml(app.state.me?.phone || 'No mobile number yet')}</div>
+        <div class="login-row-sub">${app.escapeHtml(app.state.me?.email || 'No Gmail yet')}${app.state.me?.contactVerified ? ' · <span class="contact-ok">Verified</span>' : ''}</div>
+      </div>
+      <button type="button" class="btn-secondary" id="change-contact">Change</button>
+    </div>
     <div class="login-list" id="login-list"><div class="ai-loading"><span></span><span></span><span></span> Loading…</div></div>
     <div class="danger-zone">
       <div>
@@ -58,6 +67,7 @@ export async function openSecurityPanel() {
     </div>`, { cardClass: 'feature-card' });
 
   box.querySelector('[data-close]').addEventListener('click', close);
+  box.querySelector('#change-contact').addEventListener('click', () => { close(); openContactPanel(); });
   box.querySelector('#open-linked').addEventListener('click', () => { close(); app.openLinkedDevicesPanel(); });
 
   const listEl = box.querySelector('#login-list');
