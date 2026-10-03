@@ -3481,6 +3481,7 @@ function connectSocket() {
       // is gone), or another device just did it and this one holds the new
       // session — ask the server which.
       try {
+        await new Promise((r) => setTimeout(r, 800));   // let a fresh session cookie land first
         await api('/api/auth/me');
         reconnectDelay = 1000;
         setTimeout(connectSocket, 300);

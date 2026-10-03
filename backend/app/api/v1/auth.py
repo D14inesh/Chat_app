@@ -1,9 +1,10 @@
 """Mirrors src/routes/auth.js."""
+import asyncio
 import random
 import re
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
 from app.core.security import (
     bump_session_epoch, clear_session_cookie, require_auth, session_epoch,
@@ -151,14 +152,22 @@ async def recent_logins(uid: str = Depends(require_auth)):
 
 
 @router.post("/logout-others")
-async def logout_others(request: Request, response: Response, uid: str = Depends(require_auth)):
+async def logout_others(request: Request, response: Response, background: BackgroundTasks,
+                        uid: str = Depends(require_auth)):
     """Signs out every other device: bumps the session epoch (so every older
     token stops working), gives THIS device a fresh token, and closes all
-    live connections — this device reconnects at once with its new token,
-    the others are refused and land on the login screen."""
+    live connections — this device reconnects with its new token, the
+    others are refused and land on the login screen. The sockets close
+    only after this reply (carrying the new cookie) has gone out, so the
+    asking device never checks in with its old one."""
     from app.websocket import manager as hub
 
     new_epoch = await bump_session_epoch(uid)
     set_session_cookie(response, sign_session(uid, new_epoch), request)
-    await hub.close_sessions_older_than(uid, new_epoch)
+
+    async def close_later():
+        await asyncio.sleep(0.5)
+        await hub.close_sessions_older_than(uid, new_epoch)
+
+    background.add_task(close_later)
     return {"ok": True}
