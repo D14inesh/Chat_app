@@ -45,6 +45,13 @@ export async function openSecurityPanel() {
       </div>
       <button type="button" class="btn-danger" id="logout-others">Log out all other devices</button>
     </div>
+    <div class="danger-zone device-lock">
+      <div>
+        <div class="danger-title">${icon('lock')} This device is locked to your account</div>
+        <div class="danger-sub">Only one account can be used on a device. Giving this computer to someone else? Release it — you'll be signed out and another account can sign in here.</div>
+      </div>
+      <button type="button" class="btn-danger" id="release-device">Release this device</button>
+    </div>
     <div class="modal-actions">
       <button type="button" class="btn-secondary" id="open-linked">${icon('qr')} Link a device</button>
       <button type="button" class="btn-primary" data-close>Done</button>
@@ -68,6 +75,13 @@ export async function openSecurityPanel() {
   } catch (err) {
     listEl.innerHTML = `<div class="ai-error">${app.escapeHtml(err.message)}</div>`;
   }
+
+  box.querySelector('#release-device').addEventListener('click', async (e) => {
+    if (!confirm('Release this device and sign out? Another account will then be able to sign in here. You can still sign back in as yourself.')) return;
+    e.currentTarget.disabled = true;
+    e.currentTarget.textContent = 'Releasing…';
+    await app.signOut(true);
+  });
 
   box.querySelector('#logout-others').addEventListener('click', async (e) => {
     if (!confirm('Log out every other device signed in to your account? They will need your password (or a QR link) to sign in again.')) return;

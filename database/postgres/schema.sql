@@ -610,6 +610,20 @@ CREATE TABLE IF NOT EXISTS broadcast_lists (
 );
 CREATE INDEX IF NOT EXISTS idx_broadcast_lists_user ON broadcast_lists(user_id, created_at);
 
+-- One account per device: the first account to sign in or register on a
+-- phone/computer owns it; any other account is refused there until the
+-- owner releases the device (Security & logins) or an admin does
+-- (backend/release_device.py). device_id is the phone's Android ID
+-- ("android:…") or a long-lived browser cookie ("web:…").
+CREATE TABLE IF NOT EXISTS device_bindings (
+  device_id  text PRIMARY KEY,
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label      text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_device_bindings_user ON device_bindings(user_id);
+
 CREATE TABLE IF NOT EXISTS broadcast_list_members (
   list_id   uuid NOT NULL REFERENCES broadcast_lists(id) ON DELETE CASCADE,
   member_id uuid NOT NULL REFERENCES users(id)           ON DELETE CASCADE,

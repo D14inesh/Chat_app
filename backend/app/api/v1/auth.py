@@ -11,7 +11,9 @@ from app.core.security import (
     set_session_cookie, sign_session,
 )
 from app.core.database import one, query
-from app.utils.devices import client_ip, device_label
+from app.utils.devices import (
+    bind_device, client_ip, device_id, device_label, device_owner, device_taken_message,
+)
 from app.utils.serializers import shape_user
 
 router = APIRouter(prefix="/api/auth")
@@ -68,6 +70,12 @@ async def register(request: Request, response: Response):
     if not public_key or not enc_private_key:
         raise HTTPException(400, "Missing encryption keys.")
 
+    # One account per device — a device that already has one can't make another.
+    dev = device_id(request, response)
+    owner = await device_owner(dev)
+    if owner:
+        raise HTTPException(403, device_taken_message(owner))
+
     lower = username.lower()
     taken = await one("SELECT 1 FROM users WHERE username_lower = $1", lower)
     if taken:
@@ -84,6 +92,7 @@ async def register(request: Request, response: Response):
         username, lower, (display_name or username).strip()[:60], hash_, color, public_key, enc_private_key,
     )
 
+    await bind_device(dev, user["id"], device_label(request))
     set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
     await record_login(user["id"], request, "register")
     return {"user": shape_user(user)}
@@ -109,6 +118,13 @@ async def login(request: Request, response: Response):
     if not ok:
         raise HTTPException(401, "Wrong username or password.")
 
+    # One account per device: this device may only sign in as its owner.
+    dev = device_id(request, response)
+    owner = await device_owner(dev)
+    if owner and str(owner["user_id"]) != str(row["id"]):
+        raise HTTPException(403, device_taken_message(owner))
+    await bind_device(dev, row["id"], device_label(request))
+
     await query("UPDATE users SET last_seen = now() WHERE id = $1", row["id"])
     set_session_cookie(response, sign_session(row["id"], await session_epoch(row["id"])), request)
     await record_login(row["id"], request, "password")
@@ -131,13 +147,47 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
     )
     if not row:
         raise HTTPException(401, "Not signed in")
+
+    # Sessions from before the one-account rule: the first account seen on
+    # a device claims it; a second account's session there is ended.
+    dev = device_id(request, response)
+    owner = await device_owner(dev)
+    if owner and str(owner["user_id"]) != str(uid):
+        clear_session_cookie(response, request)
+        raise HTTPException(401, device_taken_message(owner))
+    await bind_device(dev, uid, device_label(request))
+
     user = shape_user(row)
     user["businessSettings"] = row["business"] or {}
+    user["deviceLocked"] = bool(dev)
     # Sliding session: both apps call /me every time they start, so renewing
     # the cookie here keeps a user signed in until they log out themselves,
     # instead of being thrown out SESSION_TTL after their original login.
     set_session_cookie(response, sign_session(uid, await session_epoch(uid)), request)
     return {"user": user, "encPrivateKey": row["enc_private_key"]}
+
+
+@router.post("/device/release")
+async def release_device(request: Request, response: Response, uid: str = Depends(require_auth)):
+    """Frees THIS device from my account (e.g. before selling a phone) and
+    signs it out, so a different account can be used on it next. Signing
+    out is part of it: staying signed in would just claim the device again."""
+    dev = device_id(request)
+    if dev:
+        await query("DELETE FROM device_bindings WHERE device_id = $1 AND user_id = $2", dev, uid)
+    clear_session_cookie(response, request)
+    return {"ok": True}
+
+
+@router.get("/devices")
+async def my_devices(uid: str = Depends(require_auth)):
+    """The phones/computers locked to my account."""
+    rows = await query(
+        "SELECT device_id, label, created_at, last_seen FROM device_bindings WHERE user_id = $1 ORDER BY last_seen DESC",
+        uid,
+    )
+    return {"devices": [{"label": r["label"] or "Device", "kind": r["device_id"].split(":")[0],
+                         "since": r["created_at"], "lastSeen": r["last_seen"]} for r in rows]}
 
 
 @router.get("/logins")

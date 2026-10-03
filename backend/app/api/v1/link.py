@@ -159,6 +159,15 @@ async def poll_link(request: Request, response: Response):
         await query("DELETE FROM link_requests WHERE code = $1", code)
         raise HTTPException(404, "expired")
 
+    # One account per device, same as a password sign-in.
+    from app.utils.devices import bind_device, device_id, device_label, device_owner, device_taken_message
+    dev = device_id(request, response)
+    owner = await device_owner(dev)
+    if owner and str(owner["user_id"]) != str(user["id"]):
+        await query("DELETE FROM link_requests WHERE code = $1", code)
+        raise HTTPException(403, device_taken_message(owner))
+    await bind_device(dev, user["id"], device_label(request))
+
     # Single use — burn it now that we're handing over the goods.
     await query("UPDATE link_requests SET status = 'used' WHERE code = $1", code)
     await query("UPDATE users SET last_seen = now() WHERE id = $1", user["id"])

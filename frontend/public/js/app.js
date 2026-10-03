@@ -342,15 +342,20 @@ if ((() => { try { return sessionStorage.getItem('veyon.signedOutRemotely'); } c
   setTimeout(() => toast('You were signed out from another device. Sign in again to continue.', true), 900);
 }
 
-$('logout-btn').addEventListener('click', async () => {
-  try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* leaving anyway */ }
+$('logout-btn').addEventListener('click', () => signOut());
+
+/** Signs this device out. `releaseDevice` also frees the device from this
+ *  account (one account per device), so another account can sign in here. */
+async function signOut(releaseDevice = false) {
+  const path = releaseDevice ? '/api/auth/device/release' : '/api/auth/logout';
+  try { await api(path, { method: 'POST' }); } catch { /* leaving anyway */ }
   state.ws?.close(1000, 'signed out');
   clearKeyCache();
   await clearSessionKey();
   await localStore.clear();   // the on-device copies are per-account
   clearOffline();
   location.reload();
-});
+}
 
 // ═══════════════════════════════════════════════════════════
 // Linked devices — QR sign-in on a new device, no password
@@ -826,6 +831,11 @@ async function tryResume() {
       await clearSessionKey();
       clearOffline();
       setAuthMode('login');
+      // One account per device: a second account's old session ends here.
+      if (/belongs to @/.test(err.message || '')) {
+        await localStore.clear();
+        showAuthError(err.message);
+      }
       return;
     }
     // No answer from the server — open from the saved copy if there is one.
@@ -10096,7 +10106,7 @@ F.bindFeatures({
   keyFor, decryptBody, encryptText, decryptFileBytes, sendSocket, canSendTo,
   renderMessages, renderChatList, refreshComposerSuggestions, pushMessage, previewFor, senderInfo,
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
-  openLinkedDevicesPanel, openLiveGameModal, sendGameSignal,
+  openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
 });
 
 setAuthMode('login');
