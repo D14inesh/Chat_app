@@ -978,3 +978,51 @@ button.locked-row:hover { background: var(--panel-3); }
   @keyframes vm-in-left { from { opacity: 0; transform: translateY(12px); } }
 }
 @media (max-width: 899px) { .voice-mini { bottom: 92px; } }
+
+/* ── Calls ─────────────────────────────────────────────────── */
+
+.calls-btn { position: relative; }
+.calls-badge {
+  position: absolute; top: 2px; right: 1px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px;
+  background: var(--danger); color: #fff; font-size: 10px; font-weight: 800; display: grid; place-items: center;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+.calls-badge.hidden { display: none; }
+.modal-card.calls-card { max-width: 480px; }
+.calls-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.modal-card.calls-card .calls-head h3 { margin: 0; flex: 1; display: flex; align-items: center; gap: 9px; }
+.calls-head h3 svg { width: 20px; height: 20px; color: var(--accent); }
+.calls-head .link-btn { display: inline-flex; align-items: center; gap: 5px; }
+.calls-head .link-btn svg { width: 14px; height: 14px; }
+.calls-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.calls-tab {
+  padding: 6px 14px; border-radius: 99px; border: 1px solid var(--border); background: var(--inset-bg);
+  color: var(--text-dim); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.calls-tab.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.calls-list { display: flex; flex-direction: column; gap: 2px; max-height: 58vh; overflow-y: auto; margin: 0 -6px; }
+.call-row { display: flex; align-items: center; gap: 12px; padding: 9px 8px; border-radius: 12px; cursor: pointer; }
+.call-row:hover { background: var(--inset-bg); }
+.call-row .avatar { width: 44px; height: 44px; flex: none; }
+.call-row-main { flex: 1; min-width: 0; }
+.call-row-name { font-weight: 650; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-row.missed .call-row-name { color: var(--danger); }
+.call-row-sub { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--text-dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.call-arrow { width: 14px; height: 14px; flex: none; color: var(--online); }
+.call-arrow.missed, .call-arrow.declined { color: var(--danger); }
+.call-again { width: 36px; height: 36px; flex: none; color: var(--accent); }
+.call-again svg { width: 18px; height: 18px; }
+.calls-empty { text-align: center; padding: 40px 10px; color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.calls-empty svg { width: 40px; height: 40px; color: var(--muted); margin-bottom: 4px; }
+.calls-empty small { color: var(--muted); }
+
+.ringtone-list { display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.ringtone-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; cursor: pointer; }
+.ringtone-row:hover { background: var(--inset-bg); }
+.ringtone-row input { accent-color: var(--accent); width: 18px; height: 18px; }
+.ringtone-name { flex: 1; font-weight: 600; font-size: 14px; }
+.ringtone-name small { color: var(--muted); font-weight: 500; }
+.rt-play { width: 32px; height: 32px; color: var(--accent); }
+.rt-play svg { width: 14px; height: 14px; fill: currentColor; }
+#group-call-screen-btn.active { background: var(--accent); color: var(--on-accent); }
+.chat-menu button.menu-danger { color: var(--danger); }

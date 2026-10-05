@@ -53,6 +53,12 @@ _group_call_lock = asyncio.Lock()
 
 GROUP_CALL_CAP = {"video": 4, "audio": 6}
 
+# conversationId -> call_logs.id of the 1:1 call ringing/going on there, so
+# a renegotiation offer mid-call isn't logged as a new call.
+active_calls: dict[str, int] = {}
+# (conversationId, userId) -> call_logs.id of my seat in a group call.
+group_call_logs: dict[tuple[str, str], int] = {}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -165,6 +171,7 @@ async def handle_connection(websocket: WebSocket):
             conns.discard(websocket)
             if not conns:
                 del sockets[user_id]
+                await end_calls_of(user_id)
                 await query("UPDATE users SET last_seen = now() WHERE id = $1", user_id)
                 await broadcast_presence(user_id, False)
 
@@ -639,6 +646,7 @@ async def on_call_offer(ws: WebSocket, user_id: str, msg: dict):
     if await is_blocked_either_way(user_id, to_user_id):
         return await send(ws, {"type": "call-error", "conversationId": conversation_id, "error": "You can no longer call this person."})
 
+    await log_call_offer(conversation_id, user_id, to_user_id, call_type)
     await fanout(to_user_id, {"type": "call-offer", "conversationId": conversation_id, "fromUserId": user_id, "callType": call_type, "sdp": sdp})
     await fanout(user_id, {"type": "call-started-elsewhere", "conversationId": conversation_id, "toUserId": to_user_id, "callType": call_type}, ws)
 
@@ -649,6 +657,7 @@ async def on_call_answer(ws: WebSocket, user_id: str, msg: dict):
     sdp = msg.get("sdp")
     if not conversation_id or not to_user_id or not sdp:
         return
+    await log_call_status(conversation_id, "answered")
     await fanout(to_user_id, {"type": "call-answer", "conversationId": conversation_id, "fromUserId": user_id, "sdp": sdp})
     await fanout(user_id, {"type": "call-claimed", "conversationId": conversation_id}, ws)
 
@@ -658,6 +667,11 @@ async def on_call_decline(ws: WebSocket, user_id: str, msg: dict):
     to_user_id = msg.get("toUserId")
     if not conversation_id or not to_user_id:
         return
+    # The caller hanging up while it rings also arrives as a decline — for
+    # the person being called that's a missed call, not a declined one.
+    log_id = active_calls.get(conversation_id)
+    caller = await one("SELECT caller_id FROM call_logs WHERE id = $1", log_id) if log_id else None
+    await log_call_status(conversation_id, "ended" if caller and str(caller["caller_id"]) == str(user_id) else "declined")
     await fanout(to_user_id, {"type": "call-decline", "conversationId": conversation_id, "fromUserId": user_id})
     await fanout(user_id, {"type": "call-claimed", "conversationId": conversation_id}, ws)
 
@@ -676,7 +690,55 @@ async def on_call_end(ws: WebSocket, user_id: str, msg: dict):
     to_user_id = msg.get("toUserId")
     if not conversation_id or not to_user_id:
         return
+    await log_call_status(conversation_id, "ended")
     await fanout(to_user_id, {"type": "call-end", "conversationId": conversation_id, "fromUserId": user_id})
+
+
+# ── Call history ─────────────────────────────────────────────
+
+async def log_call_offer(conversation_id: str, caller: str, callee: str, call_type: str):
+    log_id = active_calls.get(conversation_id)
+    if log_id:
+        row = await one("SELECT status, started_at FROM call_logs WHERE id = $1", log_id)
+        fresh = row and (row["status"] == "answered" or (datetime.now(timezone.utc) - row["started_at"]).total_seconds() < 90)
+        if fresh:
+            return  # renegotiation of the same call
+        await log_call_status(conversation_id, "ended")
+    row = await one(
+        "INSERT INTO call_logs (conversation_id, caller_id, callee_id, call_type) VALUES ($1, $2, $3, $4) RETURNING id",
+        conversation_id, caller, callee, call_type,
+    )
+    active_calls[conversation_id] = row["id"]
+
+
+async def log_call_status(conversation_id: str, event: str):
+    """event: answered | declined | ended. Ending an unanswered call = missed."""
+    log_id = active_calls.get(conversation_id)
+    if not log_id:
+        return
+    if event == "answered":
+        await query("UPDATE call_logs SET status = 'answered', answered_at = coalesce(answered_at, now()) WHERE id = $1", log_id)
+        return
+    active_calls.pop(conversation_id, None)
+    row = await one(
+        """UPDATE call_logs SET ended_at = now(),
+                  status = CASE WHEN $2 = 'declined' THEN 'declined'
+                                WHEN status = 'answered' THEN 'answered' ELSE 'missed' END
+            WHERE id = $1 RETURNING status, callee_id, caller_id""",
+        log_id, event,
+    )
+    if row:
+        for uid in (row["caller_id"], row["callee_id"]):
+            if uid:
+                await fanout(uid, {"type": "call-log", "status": row["status"], "conversationId": conversation_id})
+
+
+async def end_calls_of(user_id: str):
+    """Their last connection dropped: close any 1:1 call they were in."""
+    for conversation_id, log_id in list(active_calls.items()):
+        row = await one("SELECT 1 FROM call_logs WHERE id = $1 AND (caller_id = $2 OR callee_id = $2)", log_id, user_id)
+        if row:
+            await log_call_status(conversation_id, "ended")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -757,6 +819,13 @@ async def on_group_call_join(ws: WebSocket, user_id: str, msg: dict):
         room[user_id] = ws
 
         await send(ws, {"type": "group-call-state", "conversationId": conversation_id, "participantIds": participant_ids})
+        if (conversation_id, user_id) not in group_call_logs:
+            row = await one(
+                """INSERT INTO call_logs (conversation_id, caller_id, is_group, call_type, status, answered_at)
+                   VALUES ($1, $2, true, $3, 'answered', now()) RETURNING id""",
+                conversation_id, user_id, msg.get("callType") if msg.get("callType") in ("audio", "video") else "audio",
+            )
+            group_call_logs[(conversation_id, user_id)] = row["id"]
         for rid in ctx["memberIds"]:
             await fanout(rid, {"type": "group-call-participant-joined", "conversationId": conversation_id, "userId": user_id}, ws)
 
@@ -776,6 +845,9 @@ async def remove_from_room(ws: WebSocket, user_id: str, conversation_id: str):
         del room[user_id]
         if not room:
             del group_call_rooms[conversation_id]
+    log_id = group_call_logs.pop((conversation_id, user_id), None)
+    if log_id:
+        await query("UPDATE call_logs SET ended_at = now() WHERE id = $1", log_id)
 
     for rid in await member_ids(conversation_id):
         await fanout(rid, {"type": "group-call-participant-left", "conversationId": conversation_id, "userId": user_id})

@@ -787,6 +787,7 @@ async function enterApp(user) {
   F.refreshAnnouncementBadge();
   F.nudgeRecoveryKey(user);
   F.checkInviteHash();     // opened from a group invite link
+  F.refreshMissedCalls();
 
   // Resume "Hey ARM" if it was on before — mirrors how a real assistant
   // stays armed across app launches once you've turned it on once. If the
@@ -1098,6 +1099,7 @@ $('request-accept-btn').addEventListener('click', async () => {
     await api(`/api/conversations/${convo.id}/accept`, { method: 'POST' });
     convo.status = 'accepted';
     updateRequestBar(convo);
+    updateCallButtons(convo);   // calling opens up once the request is accepted
     toast('Request accepted.');
   } catch (err) {
     toast(err.message, true);
@@ -3815,7 +3817,7 @@ async function handleFrame(frame) {
       const c = state.conversations.get(frame.conversationId);
       if (c) {
         c.status = 'accepted';
-        if (frame.conversationId === state.activeId) updateRequestBar(c);
+        if (frame.conversationId === state.activeId) { updateRequestBar(c); updateCallButtons(c); }
         renderChatList();
         toast(`${c.peer?.displayName || 'They'} accepted your message request.`);
         refreshPresence().then(() => { renderChatList(); updatePeerStatus(); });
@@ -5021,6 +5023,7 @@ async function startCall(callType) {
       type: 'call-offer', conversationId: convo.id, toUserId: convo.peer.id,
       callType, sdp: offer,
     });
+    F.startRinging('ringback');   // soft ring-back while it rings at their end
 
     state.call.noAnswerTimer = setTimeout(() => {
       if (state.call?.phase === 'ringing') {
@@ -5136,6 +5139,7 @@ function declineCall() {
 }
 
 async function onCallAnswerReceived(frame) {
+  F.stopRinging();
   const call = state.call;
   if (!call || call.role !== 'caller' || call.conversationId !== frame.conversationId) return;
 
@@ -5490,6 +5494,7 @@ function showIncomingCallUI(convo, fromUserId, callType) {
   $('call-decline-btn').classList.remove('hidden');
   $('call-decline-btn').innerHTML = iconPhoneOff();
   $('call-in-progress-controls').classList.add('hidden');
+  F.startRinging(F.ringtoneFor(fromUserId));   // this contact's ringtone (or the default)
 
   if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
     new Notification(`Incoming call from ${name}`);
@@ -5497,6 +5502,7 @@ function showIncomingCallUI(convo, fromUserId, callType) {
 }
 
 function showInCallUI(call) {
+  F.stopRinging();
   $('call-accept-btn').classList.add('hidden');
   $('call-in-progress-controls').classList.remove('hidden');
   $('call-status-text').textContent = 'Connecting…';
@@ -5529,6 +5535,7 @@ function showInCallUI(call) {
  *  tab is standing down because ANOTHER of my own tabs already handled it —
  *  that case must not also send call-end/call-decline to the real peer. */
 function cleanupCall(notifyPeer = true) {
+  F.stopRinging();
   const call = state.call;
   if (!call) return;
 
@@ -5674,7 +5681,7 @@ async function createGroupCallOffer(call, peerId) {
   const peer = { pc, stream: null, pendingRemoteIce: [] };
   call.peers.set(peerId, peer);
   wireGroupCallPeerConnection(call, peerId, pc);
-  call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream));
+  call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream)); F.applyGroupScreenShare(pc);
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -5704,7 +5711,7 @@ async function onGroupCallOfferReceived(frame) {
       peer = { pc, stream: null, pendingRemoteIce: [] };
       call.peers.set(fromUserId, peer);
       wireGroupCallPeerConnection(call, fromUserId, pc);
-      call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream));
+      call.localStream.getTracks().forEach((t) => pc.addTrack(t, call.localStream)); F.applyGroupScreenShare(pc);
     }
 
     await peer.pc.setRemoteDescription(sdp);
@@ -5821,6 +5828,7 @@ function leaveGroupCall() {
 }
 
 function teardownGroupCallLocal() {
+  F.stopGroupScreenShare();   // puts the camera back so it's stopped below
   const call = state.groupCall;
   if (!call) return;
 
@@ -5838,6 +5846,7 @@ function showGroupCallOverlay(convo, callType) {
   $('group-call-overlay').classList.remove('hidden');
   $('group-call-title').textContent = convo.title;
   $('group-call-camera-btn').classList.toggle('hidden', callType !== 'video');
+  $('group-call-screen-btn').classList.toggle('hidden', callType !== 'video' || !navigator.mediaDevices?.getDisplayMedia);
   renderGroupCallTiles();
 }
 
@@ -5881,6 +5890,8 @@ $('group-call-mute-btn').addEventListener('click', () => {
   track.enabled = !track.enabled;
   $('group-call-mute-btn').classList.toggle('active', !track.enabled);
 });
+
+$('group-call-screen-btn').addEventListener('click', () => F.toggleGroupScreenShare());
 
 $('group-call-camera-btn').addEventListener('click', () => {
   const track = state.groupCall?.localStream?.getVideoTracks()[0];
@@ -8853,6 +8864,7 @@ function openContactInfo() {
         ${row('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>', 'fav')}
         ${row('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>', 'mute')}
         ${row('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', 'search')}
+        ${row('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>', 'ringtone')}
         ${row('<path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>', 'clear', 'danger')}
         ${row('<circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/>', 'block', 'danger')}
       </div>
@@ -8878,6 +8890,7 @@ function openContactInfo() {
     label('fav', convo.favorite ? 'Remove from favourites' : 'Add to favourites');
     label('mute', convo.muted ? 'Unmute notifications' : 'Mute notifications');
     label('search', 'Search in chat');
+    label('ringtone', `Ringtone: ${F.RINGTONES[F.ringtoneFor(peer.id)].name}${F.ringtoneOverride(peer.id) ? '' : ' (default)'}`);
     label('clear', 'Clear chat');
     label('block', state.blockedIds.has(peer.id) ? `Unblock ${peer.displayName}` : `Block ${peer.displayName}`);
   };
@@ -8889,6 +8902,7 @@ function openContactInfo() {
       if (act === 'fav') { await toggleFavorite(convo.id); refresh(); }
       else if (act === 'mute') { await toggleMute(); refresh(); }
       else if (act === 'search') { close(); openChatSearch(); }
+      else if (act === 'ringtone') { close(); F.openRingtonePicker(peer.id, peer.displayName); }
       else if (act === 'clear') { close(); clearActiveChat(); }
       else if (act === 'block') { await toggleBlockActiveChatPeer(); refresh(); }
     });
@@ -10107,11 +10121,14 @@ F.bindFeatures({
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
   openAddMember, startChatWith, openConversation, createGroup, loadConversations,
   iconPlay, iconPause, closeActiveChat,
+  startCall, startOrJoinGroupCall, renderGroupCallTiles,
 });
 
 // An invite link opened in a tab where the app is already running only
 // changes the #hash — no reload — so watch for it.
 window.addEventListener('hashchange', () => { if (state.me) F.checkInviteHash(); });
+
+$('calls-btn').addEventListener('click', () => F.openCallsPanel());
 
 // "Forgot password?" — finishes by signing in with the new password.
 $('forgot-password').addEventListener('click', () => F.openForgotPassword((username, password) => {

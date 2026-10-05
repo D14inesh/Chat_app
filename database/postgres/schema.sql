@@ -729,3 +729,25 @@ CREATE INDEX IF NOT EXISTS idx_message_edits_msg ON message_edits(message_id, wr
 -- Chat lock: a PIN (hashed) per account; locked chats are hidden behind it.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS chat_lock_pin_hash text;
 ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS locked boolean NOT NULL DEFAULT false;
+
+-- ─────────────────────────────────────────────────────────────
+-- Call history
+-- ─────────────────────────────────────────────────────────────
+-- 1:1 calls: one row per call (caller -> callee). Group calls: one row per
+-- person who joined (caller_id = them, callee_id NULL).
+CREATE TABLE IF NOT EXISTS call_logs (
+  id              bigserial PRIMARY KEY,
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  caller_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  callee_id       uuid REFERENCES users(id) ON DELETE CASCADE,
+  is_group        boolean NOT NULL DEFAULT false,
+  call_type       text NOT NULL DEFAULT 'audio',
+  status          text NOT NULL DEFAULT 'ringing',   -- ringing | answered | declined | missed
+  started_at      timestamptz NOT NULL DEFAULT now(),
+  answered_at     timestamptz,
+  ended_at        timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_call_logs_caller ON call_logs(caller_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_call_logs_callee ON call_logs(callee_id, started_at DESC);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS calls_seen_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS calls_cleared_at timestamptz;

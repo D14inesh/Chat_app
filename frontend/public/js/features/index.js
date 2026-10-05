@@ -34,6 +34,7 @@ import { onLoginAlert } from './security.js';
 import { onAnnouncement } from './admin.js';
 import { onGroupFrame } from './groups.js';
 import { onPollClosed } from './polls.js';
+import { onCallLog } from './calls.js';
 
 /** Live frames for the newer features. Returns true when handled. */
 export function handleFeatureFrame(frame) {
@@ -45,6 +46,7 @@ export function handleFeatureFrame(frame) {
     case 'login-alert': onLoginAlert(frame); return true;
     case 'announcement': onAnnouncement(frame); return true;
     case 'poll-closed': onPollClosed(frame); return true;
+    case 'call-log': onCallLog(frame); return true;
     default: return onGroupFrame(frame);
   }
 }
@@ -64,3 +66,7 @@ export {
   myStickersHtml, wireMyStickers, openStickerMaker,
   searchFilter, passesSearchFilter, searchFiltersHtml,
 } from './chat3.js';
+export {
+  openCallsPanel, refreshMissedCalls, RINGTONES, ringtoneFor, ringtoneOverride, startRinging, stopRinging,
+  openRingtonePicker, toggleGroupScreenShare, stopGroupScreenShare, applyGroupScreenShare,
+} from './calls.js';
