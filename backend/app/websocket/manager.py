@@ -246,7 +246,7 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
 
     if not conversation_id or not ciphertext or not iv:
         return await send(ws, {"type": "error", "error": "Missing message fields", "tempId": temp_id})
-    if kind not in ("text", "file", "voice", "location", "contact", "poll"):
+    if kind not in ("text", "file", "voice", "location", "contact", "poll", "product"):
         return await send(ws, {"type": "error", "error": "Bad message kind", "tempId": temp_id})
 
     ctx = await conversation_context(conversation_id)
@@ -307,6 +307,14 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
     for rid in recipients:
         await fanout(rid, {"type": "message", "conversationId": conversation_id, "message": payload})
     await fanout(user_id, {"type": "message", "conversationId": conversation_id, "message": payload}, ws)
+
+    # A business that's "away" answers a customer automatically.
+    if ctx["kind"] == "direct" and recipients:
+        from app.api.v1.business_tools import maybe_auto_reply
+        try:
+            await maybe_auto_reply(conversation_id, user_id, recipients[0])
+        except Exception as err:  # noqa: BLE001 — never break sending over this
+            print(f"[auto-reply] {err!r}")
 
 
 async def on_typing(ws: WebSocket, user_id: str, msg: dict):

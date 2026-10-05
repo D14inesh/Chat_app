@@ -2,6 +2,7 @@
 // website on your profile, shown to people in Contact info.
 
 import { app, icon } from './core.js';
+import { openAwaySettings, openCatalogManager } from './shop.js';
 
 const CATEGORIES = [
   'Jewellery', 'Finance & loans', 'Retail shop', 'Restaurant & food', 'Grocery', 'Clothing & fashion',
@@ -44,6 +45,10 @@ export function businessSectionHtml() {
             <input id="biz-website" maxlength="200" placeholder="yourshop.com" value="${escapeAttr(b.website || '')}"></div>
         </div>
       </div>
+      <div class="biz-tools ${b.enabled ? '' : 'hidden'}" id="biz-tools">
+        <button type="button" class="btn-secondary" id="biz-catalog">${icon('bag')} Manage catalogue</button>
+        <button type="button" class="btn-secondary" id="biz-away">${icon('clock')} Away message</button>
+      </div>
       <button type="button" class="btn-primary" id="biz-save" style="margin-top:6px">Save business profile</button>
     </div>`;
 }
@@ -53,6 +58,8 @@ export function wireBusinessSection(box) {
   const fields = box.querySelector('#biz-fields');
   if (!enabled) return;
   enabled.addEventListener('change', () => fields.classList.toggle('collapsed', !enabled.checked));
+  box.querySelector('#biz-catalog')?.addEventListener('click', () => openCatalogManager());
+  box.querySelector('#biz-away')?.addEventListener('click', () => openAwaySettings());
   const save = box.querySelector('#biz-save');
   save.addEventListener('click', async () => {
     const v = (id) => box.querySelector(`#biz-${id}`).value.trim();
@@ -67,6 +74,7 @@ export function wireBusinessSection(box) {
         }),
       });
       app.state.me.businessSettings = businessSettings;
+      box.querySelector('#biz-tools')?.classList.toggle('hidden', !businessSettings.enabled);
       app.toast(enabled.checked ? 'Business profile saved.' : 'Business profile hidden.');
     } catch (err) {
       app.toast(err.message, true);
@@ -83,6 +91,7 @@ export async function businessBlockFor(userId) {
     const { user } = await app.api(`/api/users/${userId}`);
     const b = user.business;
     if (!b) return '';
+    const catalog = await app.api(`/api/users/${userId}/catalog`).then((r) => r.items).catch(() => []);
     const { escapeHtml, escapeAttr } = app;
     const row = (ic, html) => `<div class="biz-row">${icon(ic)}<span>${html}</span></div>`;
     return `
@@ -93,6 +102,8 @@ export async function businessBlockFor(userId) {
         ${b.hours ? row('clock', escapeHtml(b.hours)) : ''}
         ${b.email ? row('mail', `<a href="mailto:${escapeAttr(b.email)}">${escapeHtml(b.email)}</a>`) : ''}
         ${b.website ? row('link', `<a href="${escapeAttr(b.website)}" target="_blank" rel="noopener">${escapeHtml(b.website.replace(/^https?:\/\//, ''))}</a>`) : ''}
+        ${catalog.length ? `<button type="button" class="btn-secondary biz-catalog-btn" data-catalog-user="${escapeAttr(userId)}" data-catalog-name="${escapeAttr(user.displayName)}">
+          ${icon('bag')} View catalogue · ${catalog.length} product${catalog.length === 1 ? '' : 's'}</button>` : ''}
       </div>`;
   } catch {
     return '';

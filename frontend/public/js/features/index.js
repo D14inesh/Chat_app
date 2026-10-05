@@ -70,3 +70,7 @@ export {
   openCallsPanel, refreshMissedCalls, RINGTONES, ringtoneFor, ringtoneOverride, startRinging, stopRinging,
   openRingtonePicker, toggleGroupScreenShare, stopGroupScreenShare, applyGroupScreenShare,
 } from './calls.js';
+export {
+  productBody, productPreview, autoBody, openCatalogue, openSendProduct, openCatalogManager,
+  openAwaySettings, openChatNotes, priceText,
+} from './shop.js';

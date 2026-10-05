@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_id       uuid NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
   kind            text NOT NULL DEFAULT 'text'
-                    CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto')),
+                    CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto', 'product')),
   ciphertext      text NOT NULL,
   iv              text NOT NULL,
   file_path       text,
@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS messages (
 -- which is what's being dropped and recreated here.
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check;
 ALTER TABLE messages ADD CONSTRAINT messages_kind_check
-  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto'));
+  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto', 'product'));
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at timestamptz;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id uuid REFERENCES messages(id) ON DELETE SET NULL;
@@ -537,7 +537,7 @@ CREATE INDEX IF NOT EXISTS idx_link_requests_expiry ON link_requests(expires_at)
 -- only the votes (option numbers) are visible to the server, see poll_votes.
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check;
 ALTER TABLE messages ADD CONSTRAINT messages_kind_check
-  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto'));
+  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto', 'product'));
 
 -- view_once  : a photo/video the recipient can open a single time (see
 --              message_opens; the blob download is refused after that).
@@ -751,3 +751,43 @@ CREATE INDEX IF NOT EXISTS idx_call_logs_caller ON call_logs(caller_id, started_
 CREATE INDEX IF NOT EXISTS idx_call_logs_callee ON call_logs(callee_id, started_at DESC);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS calls_seen_at timestamptz NOT NULL DEFAULT now();
 ALTER TABLE users ADD COLUMN IF NOT EXISTS calls_cleared_at timestamptz;
+
+-- ─────────────────────────────────────────────────────────────
+-- Business: catalogue, away auto-reply, customer notes
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS catalog_items (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        text NOT NULL,
+  price       numeric(12, 2),
+  currency    text NOT NULL DEFAULT 'INR',
+  description text NOT NULL DEFAULT '',
+  photo_path  text,
+  available   boolean NOT NULL DEFAULT true,
+  position    int NOT NULL DEFAULT 0,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_user ON catalog_items(user_id, position);
+
+-- Away message: {enabled, message, mode: always|outside, from: "09:00",
+-- to: "18:00", days: [1..7 Mon-Sun], tzOffset: minutes east of UTC}.
+-- Sent automatically (plain text, kind 'auto') to someone who messages a
+-- business while it's away — at most once per person every 12 hours.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS away jsonb;
+CREATE TABLE IF NOT EXISTS auto_reply_log (
+  business_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  customer_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sent_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (business_id, customer_id)
+);
+
+-- Private notes about a chat (customer notes), encrypted with the chat's
+-- key in the app — only their author can read them.
+CREATE TABLE IF NOT EXISTS chat_notes (
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  ciphertext      text NOT NULL,
+  iv              text NOT NULL,
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, conversation_id)
+);

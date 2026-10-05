@@ -143,9 +143,11 @@ async function saveAppearanceToServer(patch) {
 // Kinds whose ciphertext is a JSON payload (decrypt-then-parse), vs 'text'
 // which decrypts straight to a string. decryptFileMeta is a generic
 // decrypt+JSON.parse despite its name — reused here for every JSON kind.
-const JSON_KINDS = new Set(['file', 'voice', 'location', 'contact', 'poll']);
+const JSON_KINDS = new Set(['file', 'voice', 'location', 'contact', 'poll', 'product']);
 
 async function decryptBody(key, m) {
+  // A business's automatic reply is plain text written by the server.
+  if (m.kind === 'auto') return m.ciphertext;
   return JSON_KINDS.has(m.kind)
     ? decryptFileMeta(key, m.ciphertext, m.iv)
     : decryptText(key, m.ciphertext, m.iv);
@@ -1512,6 +1514,7 @@ function previewFor(m) {
   if (plain === null || plain === undefined) return 'Encrypted message';
   switch (m.kind) {
     case 'poll':     return F.pollPreview(plain);
+    case 'product':  return F.productPreview(plain);
     case 'file':
       if (typeof plain !== 'object') return 'Attachment';
       if (m.viewOnce || plain.viewOnce) return F.viewOncePreview(plain);
@@ -1603,6 +1606,8 @@ function bubbleBody(m) {
   }
 
   if (m.kind === 'poll') return F.pollBody(m, plain);
+  if (m.kind === 'product') return F.productBody(m, plain);
+  if (m.kind === 'auto') return F.autoBody(m);
 
   if (m.kind === 'file') {
     if (m.viewOnce || plain.viewOnce) return F.viewOnceBody(m, plain);
@@ -2919,6 +2924,7 @@ async function sendMessage(explicitText) {
 
 $('attach-btn').addEventListener('click', (e) => {
   e.stopPropagation();
+  $('attach-menu').querySelector('[data-action="product"]')?.classList.toggle('hidden', !state.me?.businessSettings?.enabled);
   $('attach-menu').classList.toggle('hidden');
 });
 
@@ -2933,6 +2939,7 @@ $('attach-menu').addEventListener('click', (e) => {
   else if (action === 'contact') openContactForm();
   else if (action === 'poll') F.openPollComposer();
   else if (action === 'view-once') F.pickViewOnce();
+  else if (action === 'product') F.openSendProduct();
 });
 
 $('file-input').addEventListener('change', (e) => {
@@ -6931,6 +6938,7 @@ $('chat-menu').addEventListener('click', (e) => {
   else if (action === 'summarize') F.openSummarize();
   else if (action === 'export') F.openExportChat();
   else if (action === 'lock-chat') F.toggleChatLock(state.conversations.get(state.activeId));
+  else if (action === 'notes') F.openChatNotes();
 });
 
 // ── Sidebar overflow menu — starred, select chats, mark all read, app lock ──
