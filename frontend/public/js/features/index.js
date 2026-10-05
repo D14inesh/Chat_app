@@ -57,3 +57,10 @@ export {
   splitPrivateReply, textOf, privateQuoteHtml, privateReplyButtonHtml, replyPrivately, packPrivateReply,
   checkInviteHash, openJoinWithLink, openJoinPreview, openCommunities,
 } from './groups.js';
+export {
+  toggleVoice, cycleSpeed, stopVoice, repaintVoice, voiceSpeedLabel,
+  openEditHistory,
+  hideLocked, lockedRowHtml, wireLockedRow, canOpenChat, toggleChatLock, openChatLockSettings, unlockLockedChats,
+  myStickersHtml, wireMyStickers, openStickerMaker,
+  searchFilter, passesSearchFilter, searchFiltersHtml,
+} from './chat3.js';

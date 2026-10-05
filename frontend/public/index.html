@@ -469,6 +469,12 @@
             </svg>
             Search in chat
           </button>
+          <button type="button" data-action="lock-chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+            </svg>
+            <span>Lock chat</span>
+          </button>
           <button type="button" data-action="select-messages">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2"/><path d="m8 12 3 3 5-6"/>
@@ -569,6 +575,7 @@
         </div>
       </div>
 
+      <div class="chat-search-filters hidden" id="chat-search-filters"></div>
       <div class="chat-search-bar hidden" id="chat-search-bar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">

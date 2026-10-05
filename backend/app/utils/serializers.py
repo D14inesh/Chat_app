@@ -20,6 +20,8 @@ def shape_conversation(r: dict) -> dict:
         ),
         "wallpaperFit": r.get("wallpaper_fit") or "cover",
         "muted": bool(r.get("muted")),
+        # Hidden behind my chat-lock PIN (per person, like muted).
+        "locked": bool(r.get("locked")),
         "disappearSeconds": int(r.get("disappear_seconds") or 0),
         "pinnedMessage": r.get("pinned_message"),
         "pinnedBy": r.get("pinned_by"),

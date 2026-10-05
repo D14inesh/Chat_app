@@ -64,8 +64,10 @@ async def stats(_: str = Depends(require_admin)):
                   (SELECT count(*) FROM conversations WHERE kind = 'group') AS groups,
                   pg_database_size(current_database()) AS db_bytes"""
     )
+    from app.core import health
+
     return {**{k: row[k] for k in row}, "online": len(hub.online_user_ids()),
-            "storage": await _storage(), "backups": list_backups()[:7]}
+            "storage": await _storage(), "backups": list_backups()[:7], "schemaError": health.schema_error}
 
 
 @router.get("/api/admin/users")

@@ -950,6 +950,7 @@ async function keyFor(conversation) {
 async function openConversation(id) {
   const convo = state.conversations.get(id);
   if (!convo) return;
+  if (!(await F.canOpenChat(convo))) return;   // locked chat: PIN first
 
   state.activeId = id;
 
@@ -1241,14 +1242,15 @@ function renderChatList() {
     const bt = b.lastMessage?.createdAt ?? 0;
     return new Date(bt) - new Date(at);
   });
-  const convos = applyChatFilter(all);
+  const convos = F.hideLocked(applyChatFilter(all));   // locked chats stay behind the PIN
 
   if (convos.length === 0) {
-    list.innerHTML = `<div class="empty-hint">${FILTER_EMPTY_HINT[state.chatFilter]}</div>`;
+    list.innerHTML = F.lockedRowHtml() + `<div class="empty-hint">${FILTER_EMPTY_HINT[state.chatFilter]}</div>`;
+    F.wireLockedRow(list);
     return;
   }
 
-  list.innerHTML = convos.map((c) => {
+  list.innerHTML = F.lockedRowHtml() + convos.map((c) => {
     const isGroup = c.kind === 'group';
     const entity = isGroup ? { displayName: c.title, avatarColor: c.avatarColor } : c.peer;
     const name = isGroup ? c.title : c.peer.displayName;
@@ -1300,6 +1302,7 @@ function renderChatList() {
       </div>`;
   }).join('');
 
+  F.wireLockedRow(list);
   list.querySelectorAll('.chat-item').forEach((el) => {
     el.addEventListener('click', () => {
       if (state.chatSelectMode) toggleChatSelected(el.dataset.id);
@@ -1456,7 +1459,7 @@ function renderMessages() {
             <div class="meta">
               ${F.isPinned(convo, m.id) ? '<span class="pinned-mark" title="Pinned">📌</span>' : ''}
               ${F.expiryMark(m)}
-              ${m.editedAt ? '<span class="edited-tag">edited</span>' : ''}
+              ${m.editedAt ? `<button type="button" class="edited-tag" data-msg="${escapeAttr(m.id)}" title="See edit history">edited</button>` : ''}
               <span>${shortTime(m.createdAt)}</span>
               ${mine ? tickIcon(m) : ''}
             </div>
@@ -1630,6 +1633,7 @@ function bubbleBody(m) {
           <button class="voice-play-btn" aria-label="Play voice note">${iconPlay()}</button>
           <canvas class="voice-wave" width="180" height="34"></canvas>
           <span class="voice-time">${formatBytes(plain.size)}</span>
+          <button class="voice-speed-btn" type="button" title="Playback speed">${F.voiceSpeedLabel()}</button>
           <button class="voice-transcribe-btn" aria-label="Convert to text" title="Convert to text">${iconTextConvert()}</button>
         </div>
         <div class="voice-transcript hidden"></div>
@@ -1875,43 +1879,39 @@ function wireVoicePlayers() {
     const btn = el.querySelector('.voice-play-btn');
     const canvas = el.querySelector('.voice-wave');
     const timeLabel = el.querySelector('.voice-time');
-    let audio = null;
+    void timeLabel;
+    el.querySelector('.voice-speed-btn')?.addEventListener('click', (e) => { e.stopPropagation(); F.cycleSpeed(); });
 
+    // One player for the whole app (see features/chat3.js): speed control,
+    // a mini-player, and it keeps playing while you scroll or switch chats.
     btn.addEventListener('click', async () => {
-      if (audio) {
-        if (audio.paused) audio.play(); else audio.pause();
-        return;
-      }
-
+      const msgId = el.dataset.msg;
+      const conversationId = state.activeId;
+      const convo = state.conversations.get(conversationId);
+      const m = (state.messages.get(conversationId) || []).find((x) => x.id === msgId);
+      const who = m?.senderId === state.me.id ? 'You'
+        : convo?.kind === 'group' ? senderInfo(convo, m?.senderId).displayName : convo?.peer?.displayName || '';
       btn.disabled = true;
       try {
-        const meta = state.plaintext.get(el.dataset.msg);
-        const key = state.keys.get(state.activeId);
-        const blob = await getDecryptedMediaBlob(el.dataset.file, key, meta.blobIv, meta.mime);
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        const url = URL.createObjectURL(blob);
-
-        await drawWaveform(canvas, bytes.slice(0));
-
-        audio = new Audio(url);
-        audio.addEventListener('play', () => { btn.innerHTML = iconPause(); });
-        audio.addEventListener('pause', () => { btn.innerHTML = iconPlay(); });
-        audio.addEventListener('ended', () => { btn.innerHTML = iconPlay(); audio.currentTime = 0; });
-        audio.addEventListener('loadedmetadata', () => {
-          timeLabel.textContent = formatDuration(audio.duration);
+        await F.toggleVoice({
+          msgId, conversationId,
+          title: `🎤 ${who}${convo?.kind === 'group' ? ` · ${convo.title}` : ''}`,
+          getUrl: async () => {
+            const meta = state.plaintext.get(msgId);
+            const key = state.keys.get(conversationId);
+            const blob = await getDecryptedMediaBlob(el.dataset.file, key, meta.blobIv, meta.mime);
+            await drawWaveform(canvas, new Uint8Array(await blob.arrayBuffer()));
+            return URL.createObjectURL(blob);
+          },
         });
-        audio.addEventListener('timeupdate', () => {
-          timeLabel.textContent = formatDuration(Math.max(0, audio.duration - audio.currentTime));
-        });
-
-        btn.disabled = false;
-        audio.play();
       } catch (err) {
-        btn.disabled = false;
         toast(err.message, true);
+      } finally {
+        btn.disabled = false;
       }
     });
   });
+  F.repaintVoice();
 }
 
 /**
@@ -2033,6 +2033,9 @@ function wireBubbleActions() {
   });
   document.querySelectorAll('.reply-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => { e.stopPropagation(); startReply(btn.dataset.msg); });
+  });
+  document.querySelectorAll('button.edited-tag').forEach((btn) => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); F.openEditHistory(btn.dataset.msg); });
   });
   document.querySelectorAll('.private-reply-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => { e.stopPropagation(); F.replyPrivately(btn.dataset.msg); });
@@ -3090,8 +3093,10 @@ async function renderMediaPicker() {
   }
 
   if (mpTab === 'sticker') {
-    body.className = 'mp-body mp-sticker-grid';
-    body.innerHTML = STICKER_SET.map((s) => `<button type="button" class="mp-sticker">${s}</button>`).join('');
+    body.className = 'mp-body';
+    body.innerHTML = F.myStickersHtml()
+      + `<div class="mp-sticker-grid">${STICKER_SET.map((s) => `<button type="button" class="mp-sticker">${s}</button>`).join('')}</div>`;
+    F.wireMyStickers(body, () => mediaPicker.classList.add('hidden'));
     body.querySelectorAll('.mp-sticker').forEach((b) => b.addEventListener('click', () => {
       sendMessage(b.textContent);
       emojiRecent.push(b.textContent);
@@ -6914,6 +6919,7 @@ $('chat-menu').addEventListener('click', (e) => {
   else if (action === 'disappearing') F.openDisappearingPicker();
   else if (action === 'summarize') F.openSummarize();
   else if (action === 'export') F.openExportChat();
+  else if (action === 'lock-chat') F.toggleChatLock(state.conversations.get(state.activeId));
 });
 
 // ── Sidebar overflow menu — starred, select chats, mark all read, app lock ──
@@ -8654,6 +8660,8 @@ function openLiveGameModal(title, boardId, controlsId, boardClass = boardId) {
  *  match the currently-open conversation — called right before the menu
  *  becomes visible, so it can't show a stale state. */
 function updateChatMenuLabels() {
+  const lockBtn = $('chat-menu')?.querySelector('[data-action="lock-chat"] span');
+  if (lockBtn) lockBtn.textContent = state.conversations.get(state.activeId)?.locked ? 'Remove chat lock' : 'Lock chat';
   const convo = state.conversations.get(state.activeId);
   if (!convo) return;
   const muteLabel = $('chat-menu-mute-label');
@@ -9707,7 +9715,40 @@ const SEARCH_HISTORY_BATCH_CAP = 10; // 10 * 50 = up to 500 messages back
 
 let searchState = { results: [], index: -1, extending: false };
 
+function drawSearchFilters() {
+  const row = $('chat-search-filters');
+  row.innerHTML = F.searchFiltersHtml(state.conversations.get(state.activeId));
+  row.classList.remove('hidden');
+  row.querySelectorAll('.search-chip').forEach((b) => b.addEventListener('click', () => {
+    F.searchFilter.kind = b.dataset.kind;
+    drawSearchFilters();
+    runSearch($('chat-search-input').value);
+  }));
+  row.querySelector('#search-from')?.addEventListener('change', (e) => {
+    F.searchFilter.from = e.target.value;
+    runSearch($('chat-search-input').value);
+  });
+  row.querySelector('#search-date')?.addEventListener('change', (e) => jumpToDate(e.target.value));
+}
+
+/** Jumps to the first message on or after a date, loading older history as needed. */
+async function jumpToDate(value) {
+  if (!value) return;
+  const target = new Date(`${value}T00:00:00`);
+  const conversationId = state.activeId;
+  for (let i = 0; i < 20; i++) {
+    const list = state.messages.get(conversationId) || [];
+    if (list.length && new Date(list[0].createdAt) <= target) break;
+    if (!(await loadOlderMessages(conversationId))) break;
+  }
+  const hit = (state.messages.get(conversationId) || []).find((m) => new Date(m.createdAt) >= target);
+  if (hit) jumpToMessage(hit.id);
+  else toast('No messages from that day on.', true);
+}
+
 function closeChatSearch() {
+  $('chat-pane')?.classList.remove('search-open');
+  $('chat-search-filters')?.classList.add('hidden');
   $('chat-search-bar').classList.add('hidden');
   $('chat-search-input').value = '';
   $('chat-search-count').textContent = '';
@@ -9717,6 +9758,10 @@ function closeChatSearch() {
 function openChatSearch() {
   if (!state.activeId) return;
   $('chat-search-bar').classList.remove('hidden');
+  F.searchFilter.kind = 'all';
+  F.searchFilter.from = '';
+  drawSearchFilters();
+  $('chat-pane').classList.add('search-open');   // messages move down, clear of the bars
   const input = $('chat-search-input');
   input.value = '';
   input.focus();
@@ -9787,7 +9832,8 @@ async function loadOlderMessages(conversationId) {
 
 function runSearch(term) {
   const q = term.trim().toLowerCase();
-  if (!q) {
+  const filtered = F.searchFilter.kind !== 'all' || F.searchFilter.from;
+  if (!q && !filtered) {
     searchState.results = [];
     searchState.index = -1;
     $('chat-search-count').textContent = '';
@@ -9798,7 +9844,10 @@ function runSearch(term) {
   searchState.results = list
     .filter((m) => {
       const plain = state.plaintext.get(m.id);
-      return typeof plain === 'string' && plain.toLowerCase().includes(q);
+      if (!F.passesSearchFilter(m, plain)) return false;
+      if (!q) return true;
+      const text = typeof plain === 'string' ? F.textOf(plain) : (plain?.name || '');
+      return text.toLowerCase().includes(q);
     })
     .map((m) => m.id);
 
@@ -9841,12 +9890,13 @@ function notify(convo, message) {
     case 'voice':    body = 'Sent a voice message'; break;
     case 'location': body = 'Shared a location'; break;
     case 'contact':  body = 'Shared a contact'; break;
-    default:         body = typeof plain === 'string' ? plain : 'New message';
+    default:         body = typeof plain === 'string' ? F.textOf(plain) : 'New message';
   }
 
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const title = convo.kind === 'group' ? convo.title : convo.peer.displayName;
-  new Notification(title, { body: body.slice(0, 120) });
+  // Locked chats never show who or what in a notification.
+  const title = convo.locked ? 'Veyon Chat' : convo.kind === 'group' ? convo.title : convo.peer.displayName;
+  new Notification(title, { body: convo.locked ? 'New message' : body.slice(0, 120) });
 }
 
 if ('Notification' in window && Notification.permission === 'default') {
@@ -10056,6 +10106,7 @@ F.bindFeatures({
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
   openAddMember, startChatWith, openConversation, createGroup, loadConversations,
+  iconPlay, iconPause, closeActiveChat,
 });
 
 // An invite link opened in a tab where the app is already running only

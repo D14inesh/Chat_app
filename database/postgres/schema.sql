@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_id       uuid NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
   kind            text NOT NULL DEFAULT 'text'
-                    CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact')),
+                    CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto')),
   ciphertext      text NOT NULL,
   iv              text NOT NULL,
   file_path       text,
@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS messages (
 -- which is what's being dropped and recreated here.
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check;
 ALTER TABLE messages ADD CONSTRAINT messages_kind_check
-  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact'));
+  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto'));
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at timestamptz;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id uuid REFERENCES messages(id) ON DELETE SET NULL;
@@ -537,7 +537,7 @@ CREATE INDEX IF NOT EXISTS idx_link_requests_expiry ON link_requests(expires_at)
 -- only the votes (option numbers) are visible to the server, see poll_votes.
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check;
 ALTER TABLE messages ADD CONSTRAINT messages_kind_check
-  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll'));
+  CHECK (kind IN ('text', 'file', 'voice', 'location', 'contact', 'poll', 'auto'));
 
 -- view_once  : a photo/video the recipient can open a single time (see
 --              message_opens; the blob download is refused after that).
@@ -712,3 +712,20 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_announcement boolean NOT N
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_closes_at timestamptz;
 -- "@everyone" in a group — notifies every member, even with the chat muted.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS mention_all boolean NOT NULL DEFAULT false;
+
+-- ─────────────────────────────────────────────────────────────
+-- Edit history, chat lock
+-- ─────────────────────────────────────────────────────────────
+-- Earlier versions of an edited message (still encrypted, same key).
+CREATE TABLE IF NOT EXISTS message_edits (
+  id         bigserial PRIMARY KEY,
+  message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  ciphertext text NOT NULL,
+  iv         text NOT NULL,
+  written_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_edits_msg ON message_edits(message_id, written_at);
+
+-- Chat lock: a PIN (hashed) per account; locked chats are hidden behind it.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS chat_lock_pin_hash text;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS locked boolean NOT NULL DEFAULT false;

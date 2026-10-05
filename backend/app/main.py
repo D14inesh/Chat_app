@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core import database as db
+from app.core import health
 from app.core.config import CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_PORT, PORT, PROJECT_DIR, UPLOAD_DIR
 from app.core.database import close_pool, init_pool
 from app.schedulers.reminders_scheduler import run_reminder_scheduler
@@ -119,6 +120,7 @@ async def lifespan(app: FastAPI):
         await _apply_schema_file()
     except Exception as err:  # noqa: BLE001
         print(f"[migrate] schema.sql failed: {err!r}")
+        health.schema_error = repr(err)
 
     _background_tasks.append(asyncio.create_task(run_reminder_scheduler()))
     _background_tasks.append(asyncio.create_task(run_scheduled_messages_poller()))

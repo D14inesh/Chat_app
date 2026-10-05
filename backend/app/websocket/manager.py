@@ -407,11 +407,19 @@ async def on_edit_message(ws: WebSocket, user_id: str, msg: dict):
     if not conversation_id or not message_id or not ciphertext or not iv:
         return
 
-    row = await one("SELECT sender_id, kind FROM messages WHERE id = $1 AND conversation_id = $2", message_id, conversation_id)
+    row = await one(
+        "SELECT sender_id, kind, ciphertext, iv, coalesce(edited_at, created_at) AS written_at FROM messages WHERE id = $1 AND conversation_id = $2",
+        message_id, conversation_id,
+    )
     if not row or row["sender_id"] != user_id:
         return await send(ws, {"type": "error", "error": "You can only edit your own messages."})
     if row["kind"] != "text":
         return await send(ws, {"type": "error", "error": "Only text messages can be edited."})
+    # Keep the version being replaced, for "Edit history".
+    await query(
+        "INSERT INTO message_edits (message_id, ciphertext, iv, written_at) VALUES ($1, $2, $3, $4)",
+        message_id, row["ciphertext"], row["iv"], row["written_at"],
+    )
 
     updated = await one(
         "UPDATE messages SET ciphertext = $1, iv = $2, edited_at = now() WHERE id = $3 RETURNING edited_at",

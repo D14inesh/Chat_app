@@ -63,7 +63,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
     rows = await query(
         """WITH mine AS (
              SELECT conversation_id, favorite, wallpaper, wallpaper_photo_path, wallpaper_fit,
-                    muted, cleared_at, hidden_at, role
+                    muted, cleared_at, hidden_at, role, locked
                FROM conversation_members WHERE user_id = $1
            ),
            peer AS (
@@ -121,7 +121,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
                   lm.iv AS last_iv, lm.created_at AS last_at,
                   lm.delivered_at AS last_delivered, lm.read_at AS last_read, lm.view_once AS last_view_once,
                   COALESCE(un.n, 0) AS unread,
-                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted
+                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted, mm.locked
              FROM conversations c
              LEFT JOIN mine mm       ON mm.conversation_id = c.id
              LEFT JOIN peer p        ON p.conversation_id = c.id

@@ -130,6 +130,8 @@ async function renderOverview(body) {
   const total = s.storage.uploads + s.storage.avatars + s.storage.backups + s.db_bytes;
   const bar = (n, cls) => `<span class="${cls}" style="width:${Math.max(total ? (n / total) * 100 : 0, n ? 1.5 : 0)}%"></span>`;
   body.innerHTML = `
+    ${s.schemaError ? `<div class="admin-alert">${icon('info')}<div><b>The database update failed when the server started.</b>
+      Some new features won’t work until it’s fixed. Details: <code>${app.escapeHtml(s.schemaError)}</code></div></div>` : ''}
     <div class="admin-stats">
       ${stat('Users', num(s.users), `+${num(s.new_week)} this week`)}
       ${stat('Online now', num(s.online), '', 'good')}

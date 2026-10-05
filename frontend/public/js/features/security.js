@@ -5,6 +5,7 @@
 import { app, icon, openModal, whenText } from './core.js';
 import { openContactPanel } from './contact.js';
 import { openRecoveryKeySetup } from './recovery.js';
+import { openChatLockSettings } from './chat3.js';
 
 const METHOD_LABEL = { password: 'Password', qr: 'QR code (linked device)', register: 'New account' };
 
@@ -57,6 +58,14 @@ export async function openSecurityPanel() {
       </div>
       <button type="button" class="btn-secondary" id="recovery-key">${app.state.me?.hasRecoveryKey ? 'New key' : 'Create'}</button>
     </div>
+    <div class="contact-summary">
+      <div class="login-row-icon">${icon('lock')}</div>
+      <div class="login-row-body">
+        <div class="login-row-device">Chat lock</div>
+        <div class="login-row-sub">Hide chats behind a PIN — lock one from its ⋮ menu</div>
+      </div>
+      <button type="button" class="btn-secondary" id="chat-lock-settings">Settings</button>
+    </div>
     <div class="login-list" id="login-list"><div class="ai-loading"><span></span><span></span><span></span> Loading…</div></div>
     <div class="danger-zone">
       <div>
@@ -80,6 +89,7 @@ export async function openSecurityPanel() {
   box.querySelector('[data-close]').addEventListener('click', close);
   box.querySelector('#change-contact').addEventListener('click', () => { close(); openContactPanel(); });
   box.querySelector('#recovery-key').addEventListener('click', () => { close(); openRecoveryKeySetup(); });
+  box.querySelector('#chat-lock-settings').addEventListener('click', () => { close(); openChatLockSettings(); });
   box.querySelector('#open-linked').addEventListener('click', () => { close(); app.openLinkedDevicesPanel(); });
 
   const listEl = box.querySelector('#login-list');
