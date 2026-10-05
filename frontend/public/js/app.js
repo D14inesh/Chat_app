@@ -786,6 +786,7 @@ async function enterApp(user) {
   F.showAdminEntry(user);
   F.refreshAnnouncementBadge();
   F.nudgeRecoveryKey(user);
+  F.checkInviteHash();     // opened from a group invite link
 
   // Resume "Hey ARM" if it was on before — mirrors how a real assistant
   // stays armed across app launches once you've turned it on once. If the
@@ -986,6 +987,7 @@ async function openConversation(id) {
   updateRequestBar(convo);
   F.renderDisappearingChip();
   F.renderPinnedBar();
+  F.onChatOpened();       // admin-only composer, private-reply strip
 
   // Clear the unread badge immediately — waiting for the server round-trip
   // makes the UI feel laggy.
@@ -1275,7 +1277,7 @@ function renderChatList() {
         </div>
         <div class="body">
           <div class="row-1">
-            <span class="name">${escapeHtml(name)}</span>
+            <span class="name">${c.isAnnouncement ? '📢 ' : ''}${escapeHtml(name)}</span>
             <div class="row-1-right">
               <button type="button" class="fav-star ${c.favorite ? 'active' : ''}" data-fav-id="${c.id}"
                       title="${c.favorite ? 'Remove from Favourites' : 'Add to Favourites'}"
@@ -1290,6 +1292,7 @@ function renderChatList() {
           </div>
           <div class="row-2">
             <span class="preview">${draftHtml || `${c.muted ? '🔕 ' : ''}${c.disappearSeconds ? '<span class="preview-timer" title="Disappearing messages on">⏱</span>' : ''}${mine ? tickIcon(c.lastMessage, true) : ''}${escapeHtml(preview)}`}</span>
+            ${c.joinRequests > 0 ? `<span class="badge join-badge" title="Asking to join">+${c.joinRequests}</span>` : ''}
             ${c.unread > 0 ? `<span class="badge">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
           </div>
           ${labelChips}
@@ -1513,7 +1516,7 @@ function previewFor(m) {
     case 'voice':    return '🎤 Voice message';
     case 'location': return '📍 Location';
     case 'contact':  return `👤 ${typeof plain === 'object' ? plain.name : 'Contact'}`;
-    default:         return typeof plain === 'string' ? plain : 'Message';
+    default:         return typeof plain === 'string' ? F.textOf(plain) : 'Message';
   }
 }
 
@@ -1550,6 +1553,7 @@ function bubbleActionsHtml(m, mine) {
       <button type="button" class="bubble-action-btn star-btn${starred ? ' active' : ''}" data-msg="${escapeAttr(m.id)}" title="${starred ? 'Unstar' : 'Star'}">${iconStar()}</button>
       <button type="button" class="bubble-action-btn react-btn" data-msg="${escapeAttr(m.id)}" title="React">${iconSmile()}</button>
       <button type="button" class="bubble-action-btn reply-btn" data-msg="${escapeAttr(m.id)}" title="Reply">${iconReply()}</button>
+      ${F.privateReplyButtonHtml(m, state.conversations.get(state.activeId), mine)}
       ${F.pinButtonHtml(m)}
       ${F.translateButtonHtml(m)}
       ${viewOnce ? '' : `<button type="button" class="bubble-action-btn forward-btn" data-msg="${escapeAttr(m.id)}" title="Forward">${iconForward()}</button>`}
@@ -1656,10 +1660,14 @@ function bubbleBody(m) {
       </div>`;
   }
 
+  const pr = F.splitPrivateReply(plain);
+  if (pr) {
+    return `${F.privateQuoteHtml(pr.quote)}<div class="text">${linkify(escapeHtml(pr.text))}</div>${F.translationHtml(m)}`;
+  }
   if (typeof plain === 'string' && isJumboEmoji(plain)) {
     return `<div class="text jumbo">${escapeHtml(plain)}</div>`;
   }
-  return `<div class="text">${linkify(escapeHtml(plain))}</div>${F.translationHtml(m)}`;
+  return `<div class="text">${F.highlightEveryone(linkify(escapeHtml(plain)), m)}</div>${F.translationHtml(m)}`;
 }
 
 /** True for a message that's nothing but a handful of emoji — rendered big
@@ -2025,6 +2033,9 @@ function wireBubbleActions() {
   });
   document.querySelectorAll('.reply-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => { e.stopPropagation(); startReply(btn.dataset.msg); });
+  });
+  document.querySelectorAll('.private-reply-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); F.replyPrivately(btn.dataset.msg); });
   });
   document.querySelectorAll('.edit-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => { e.stopPropagation(); startEdit(btn.dataset.msg); });
@@ -2496,6 +2507,7 @@ input.addEventListener('input', () => {
   refreshComposerSuggestions();
   if (!state.editingId) F.setDraft(state.activeId, input.value);   // keep a draft per chat
   F.quickReplyInput(input);                                         // "/shortcut" popup
+  F.onComposerMention(input);                                       // "@everyone" for group admins
 });
 
 input.addEventListener('keydown', (e) => {
@@ -2876,19 +2888,21 @@ async function sendMessage(explicitText) {
   // Optimistic bubble — it appears instantly and is swapped for the server's
   // copy when the 'sent' frame comes back.
   const tempId = 'temp-' + crypto.randomUUID();
+  const mentionAll = F.iAmGroupAdmin(convo) && F.mentionsEveryone(text);
   const optimistic = {
-    id: tempId, senderId: state.me.id, kind: 'text', replyToId,
+    id: tempId, senderId: state.me.id, kind: 'text', replyToId, mentionAll,
     createdAt: new Date().toISOString(), pending: true,
   };
+  const body = F.packPrivateReply(conversationId, text);   // "reply privately" quote, encrypted with it
 
-  state.plaintext.set(tempId, text);
+  state.plaintext.set(tempId, body);
   pushMessage(conversationId, optimistic);
   renderMessages();
 
   try {
     const key = await keyFor(convo);
-    const { ciphertext, iv } = await encryptText(key, text);
-    sendSocket({ type: 'send', conversationId, ciphertext, iv, kind: 'text', tempId, replyToId });
+    const { ciphertext, iv } = await encryptText(key, body);
+    sendSocket({ type: 'send', conversationId, ciphertext, iv, kind: 'text', tempId, replyToId, mentionAll });
   } catch (err) {
     removeMessage(conversationId, tempId);
     renderMessages();
@@ -3326,7 +3340,7 @@ async function sendVoiceNote(blob) {
 // ── Location & contact cards ─────────────────────────────────
 
 /** Shared sender for any JSON-payload message kind (location, contact). */
-async function sendJsonMessage(kind, payload) {
+async function sendJsonMessage(kind, payload, extras = {}) {
   if (!state.activeId) return;
 
   const conversationId = state.activeId;
@@ -3335,7 +3349,7 @@ async function sendJsonMessage(kind, payload) {
 
   const tempId = 'temp-' + crypto.randomUUID();
   const optimistic = {
-    id: tempId, senderId: state.me.id, kind,
+    id: tempId, senderId: state.me.id, kind, ...extras,
     createdAt: new Date().toISOString(), pending: true,
   };
 
@@ -3346,7 +3360,7 @@ async function sendJsonMessage(kind, payload) {
   try {
     const key = await keyFor(convo);
     const { ciphertext, iv } = await encryptText(key, JSON.stringify(payload));
-    sendSocket({ type: 'send', conversationId, ciphertext, iv, kind, tempId });
+    sendSocket({ type: 'send', conversationId, ciphertext, iv, kind, tempId, ...extras });
   } catch (err) {
     removeMessage(conversationId, tempId);
     renderMessages();
@@ -3876,7 +3890,7 @@ async function onIncoming(frame) {
     if (!input.value.trim()) refreshComposerSuggestions();   // fresh quick replies
   } else if (message.senderId !== state.me.id) {
     convo.unread = (convo.unread || 0) + 1;
-    if (!convo.muted) notify(convo, message);
+    if (!convo.muted || message.mentionAll) notify(convo, message);
   }
 
   renderChatList();
@@ -4847,91 +4861,7 @@ function openActiveConversationInfo() {
 $('peer-avatar')?.addEventListener('click', openActiveConversationInfo);
 $('peer-name')?.addEventListener('click', openActiveConversationInfo);
 
-async function openGroupInfo() {
-  const convo = state.conversations.get(state.activeId);
-  if (!convo || convo.kind !== 'group') return;
-
-  let members;
-  try {
-    ({ members } = await api(`/api/conversations/${convo.id}/members`));
-    state.groupMembers.set(convo.id, members);
-  } catch (err) {
-    toast(err.message, true);
-    return;
-  }
-
-  const iAmOwner = members.find((m) => m.id === state.me.id)?.role === 'owner';
-
-  const box = document.createElement('div');
-  box.className = 'modal-backdrop';
-  box.innerHTML = `
-    <div class="modal-card">
-      <h3>${escapeHtml(convo.title)}</h3>
-      <p style="color:var(--muted);font-size:12.5px;margin:-10px 0 16px;">
-        ${members.length} member${members.length === 1 ? '' : 's'}
-      </p>
-      <div id="group-member-list">
-        ${members.map((m) => `
-          <div class="member-row" data-user="${escapeAttr(m.id)}">
-            <div class="avatar sm" style="background:${escapeAttr(m.avatarColor)}">${avatarInner(m)}</div>
-            <span class="name">${escapeHtml(m.displayName)}${m.id === state.me.id ? ' (you)' : ''}</span>
-            ${m.role === 'owner' ? '<span class="role-tag">Owner</span>' : ''}
-            ${iAmOwner && m.id !== state.me.id
-              ? `<button type="button" class="remove-member-btn" data-user="${escapeAttr(m.id)}">Remove</button>`
-              : ''}
-          </div>`).join('')}
-      </div>
-      ${iAmOwner ? '<button type="button" class="btn-secondary" id="group-add-member" style="margin-top:8px;">Add member</button>' : ''}
-      <div class="modal-actions">
-        <button type="button" class="btn-secondary" id="group-info-close">Close</button>
-        <button type="button" class="btn-primary" id="group-leave" style="background:var(--danger);">Leave group</button>
-      </div>
-    </div>`;
-  document.body.appendChild(box);
-
-  const close = () => box.remove();
-  box.addEventListener('click', (e) => { if (e.target === box) close(); });
-  box.querySelector('#group-info-close').addEventListener('click', close);
-
-  box.querySelector('#group-leave').addEventListener('click', async () => {
-    if (!confirm(`Leave "${convo.title}"?`)) return;
-    try {
-      await api(`/api/conversations/${convo.id}/members/${state.me.id}`, { method: 'DELETE' });
-      close();
-      state.conversations.delete(convo.id);
-      state.groupMembers.delete(convo.id);
-      state.keys.delete(convo.id);
-      if (state.activeId === convo.id) {
-        state.activeId = null;
-        $('chat-pane').classList.add('hidden');
-        $('no-chat').classList.remove('hidden');
-      }
-      renderChatList();
-    } catch (err) {
-      toast(err.message, true);
-    }
-  });
-
-  box.querySelectorAll('.remove-member-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      try {
-        await api(`/api/conversations/${convo.id}/members/${btn.dataset.user}`, { method: 'DELETE' });
-        close();
-        openGroupInfo();
-      } catch (err) {
-        toast(err.message, true);
-      }
-    });
-  });
-
-  const addBtn = box.querySelector('#group-add-member');
-  if (addBtn) {
-    addBtn.addEventListener('click', () => {
-      close();
-      openAddMember(convo, members);
-    });
-  }
-}
+function openGroupInfo() { return F.openGroupInfo(); }
 
 async function openAddMember(convo, currentMembers) {
   const currentIds = new Set(currentMembers.map((m) => m.id));
@@ -7013,6 +6943,8 @@ $('sidebar-menu').addEventListener('click', (e) => {
   else if (action === 'chat-features') F.openFeatureSettings();
   else if (action === 'announcements') F.openAnnouncements();
   else if (action === 'admin') F.openAdminPanel();
+  else if (action === 'communities') F.openCommunities();
+  else if (action === 'join-link') F.openJoinWithLink();
 });
 
 // ── Wallpaper ─────────────────────────────────────────────
@@ -10123,7 +10055,12 @@ F.bindFeatures({
   renderMessages, renderChatList, refreshComposerSuggestions, pushMessage, previewFor, senderInfo,
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
+  openAddMember, startChatWith, openConversation, createGroup, loadConversations,
 });
+
+// An invite link opened in a tab where the app is already running only
+// changes the #hash — no reload — so watch for it.
+window.addEventListener('hashchange', () => { if (state.me) F.checkInviteHash(); });
 
 // "Forgot password?" — finishes by signing in with the new password.
 $('forgot-password').addEventListener('click', () => F.openForgotPassword((username, password) => {

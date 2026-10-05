@@ -20,6 +20,34 @@ function tally(m, optionCount) {
   return { counts, voters, total: (m.votes || []).length };
 }
 
+const isClosed = (m) => !!m.pollClosesAt && new Date(m.pollClosesAt) <= new Date();
+
+function closesText(m) {
+  if (!m.pollClosesAt) return '';
+  const ms = new Date(m.pollClosesAt) - Date.now();
+  if (ms <= 0) return 'Closed · final results';
+  const min = Math.round(ms / 60000);
+  if (min < 60) return `Closes in ${Math.max(1, min)} min`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `Closes in ${h} h`;
+  return `Closes ${new Date(m.pollClosesAt).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}`;
+}
+
+// Re-draw the open chat when a poll in it reaches its closing time.
+const closeTimers = new Map();
+function scheduleClose(m) {
+  if (!m.pollClosesAt || isClosed(m) || closeTimers.has(m.id)) return;
+  const ms = new Date(m.pollClosesAt) - Date.now();
+  if (ms > 2 ** 31 - 1) return;
+  closeTimers.set(m.id, setTimeout(() => { closeTimers.delete(m.id); app.renderMessages(); }, ms + 500));
+}
+
+function canClose(m) {
+  if (isClosed(m) || m.pending) return false;
+  const convo = app.state.conversations.get(app.state.activeId);
+  return m.senderId === app.state.me.id || (convo?.kind === 'group' && ['owner', 'admin'].includes(convo.myRole));
+}
+
 function myChoices(m) {
   return (m.votes || []).find((v) => v.userId === app.state.me.id)?.choices || [];
 }
@@ -34,10 +62,13 @@ export function pollBody(m, plain) {
   const mine = new Set(myChoices(m));
   const max = Math.max(1, ...counts);
   const people = total === 1 ? '1 vote' : `${total} votes`;
+  const closed = isClosed(m);
+  scheduleClose(m);
 
   return `
-    <div class="poll-card" data-msg="${escapeAttr(m.id)}">
-      <div class="poll-head">${icon('poll')}<span>Poll</span></div>
+    <div class="poll-card ${closed ? 'closed' : ''}" data-msg="${escapeAttr(m.id)}">
+      <div class="poll-head">${icon('poll')}<span>${closed ? 'Poll · closed' : 'Poll'}</span>
+        ${m.pollClosesAt ? `<span class="poll-deadline ${closed ? 'done' : ''}">${icon('clock')} ${closesText(m)}</span>` : ''}</div>
       <div class="poll-question">${escapeHtml(plain.question)}</div>
       <div class="poll-hint">${plain.multi ? 'Select one or more' : 'Select one'}</div>
       <div class="poll-options">
@@ -46,7 +77,7 @@ export function pollBody(m, plain) {
           const leading = counts[i] > 0 && counts[i] === max;
           return `
             <button type="button" class="poll-option${mine.has(i) ? ' chosen' : ''}${leading ? ' leading' : ''}"
-                    data-idx="${i}" ${m.pending ? 'disabled' : ''}>
+                    data-idx="${i}" ${m.pending || closed ? 'disabled' : ''}>
               <span class="poll-check ${plain.multi ? 'square' : ''}">${mine.has(i) ? icon('check') : ''}</span>
               <span class="poll-option-body">
                 <span class="poll-option-row">
@@ -58,9 +89,12 @@ export function pollBody(m, plain) {
             </button>`;
         }).join('')}
       </div>
-      <button type="button" class="poll-footer" data-msg="${escapeAttr(m.id)}" ${total ? '' : 'disabled'}>
-        ${total ? `${people} · View votes` : 'No votes yet'}
-      </button>
+      <div class="poll-footer-row">
+        <button type="button" class="poll-footer" data-msg="${escapeAttr(m.id)}" ${total ? '' : 'disabled'}>
+          ${total ? `${people} · View votes` : 'No votes yet'}
+        </button>
+        ${canClose(m) ? `<button type="button" class="poll-close-btn" data-msg="${escapeAttr(m.id)}">Close poll</button>` : ''}
+      </div>
     </div>`;
 }
 
@@ -79,6 +113,11 @@ export function wirePolls(root = document) {
       e.stopPropagation();
       showVoters(msgId);
     });
+    card.querySelector('.poll-close-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!confirm('Close this poll now? No one can vote after that.')) return;
+      app.sendSocket({ type: 'close-poll', conversationId: app.state.activeId, messageId: msgId });
+    });
   });
 }
 
@@ -89,7 +128,7 @@ function findMessage(msgId) {
 function vote(msgId, idx) {
   const m = findMessage(msgId);
   const plain = app.state.plaintext.get(msgId);
-  if (!m || m.pending || !plain) return;
+  if (!m || m.pending || !plain || isClosed(m)) return;
   const convo = app.state.conversations.get(app.state.activeId);
   if (!app.canSendTo(convo)) return;
 
@@ -137,6 +176,13 @@ function showVoters(msgId) {
   box.querySelector('[data-close]').addEventListener('click', close);
 }
 
+export function onPollClosed(frame) {
+  const m = app.state.messages.get(frame.conversationId)?.find((x) => x.id === frame.messageId);
+  if (!m) return;
+  m.pollClosesAt = frame.closesAt;
+  if (frame.conversationId === app.state.activeId) app.renderMessages();
+}
+
 /** Live update from the server. */
 export function onPollVotes(frame) {
   const list = app.state.messages.get(frame.conversationId);
@@ -169,6 +215,18 @@ export function openPollComposer() {
       </span>
       <input type="checkbox" id="poll-multi" class="switch">
     </label>
+    <div class="field poll-deadline-field">
+      <label for="poll-close">Close the poll</label>
+      <select id="poll-close">
+        <option value="">Never — stays open</option>
+        <option value="3600">In 1 hour</option>
+        <option value="86400">In 1 day</option>
+        <option value="259200">In 3 days</option>
+        <option value="604800">In 1 week</option>
+        <option value="custom">On a date I pick…</option>
+      </select>
+      <input type="datetime-local" id="poll-close-at" class="hidden">
+    </div>
     <div class="modal-actions">
       <button type="button" class="btn-secondary" data-close>Cancel</button>
       <button type="button" class="btn-primary" id="poll-send" disabled>${icon('send')} Send poll</button>
@@ -217,13 +275,31 @@ export function openPollComposer() {
   qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); optsEl.querySelector('input')?.focus(); } });
   box.querySelector('#poll-add').addEventListener('click', () => addOption(true));
   box.querySelector('[data-close]').addEventListener('click', close);
+  const closeSel = box.querySelector('#poll-close');
+  const closeAt = box.querySelector('#poll-close-at');
+  closeSel.addEventListener('change', () => {
+    closeAt.classList.toggle('hidden', closeSel.value !== 'custom');
+    if (closeSel.value === 'custom' && !closeAt.value) {
+      const d = new Date(Date.now() + 86400000);
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      closeAt.value = d.toISOString().slice(0, 16);
+    }
+  });
   sendBtn.addEventListener('click', () => {
     const options = values().filter(Boolean);
+    let pollClosesAt;
+    if (closeSel.value === 'custom') {
+      const at = new Date(closeAt.value);
+      if (!(at > new Date())) { app.toast('Pick a closing time in the future.', true); return; }
+      pollClosesAt = at.toISOString();
+    } else if (closeSel.value) {
+      pollClosesAt = new Date(Date.now() + Number(closeSel.value) * 1000).toISOString();
+    }
     app.sendJsonMessage('poll', {
       question: qEl.value.trim(),
       options,
       multi: box.querySelector('#poll-multi').checked,
-    });
+    }, pollClosesAt ? { pollClosesAt } : {});
     close();
   });
   qEl.focus();

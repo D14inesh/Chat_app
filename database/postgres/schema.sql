@@ -88,7 +88,7 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS requested_by uuid REFERENCES 
 CREATE TABLE IF NOT EXISTS conversation_members (
   conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
-  role            text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'member')),
+  role            text NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
   joined_at       timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (conversation_id, user_id)
 );
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS conversation_members (
 ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'member';
 ALTER TABLE conversation_members DROP CONSTRAINT IF EXISTS conversation_members_role_check;
 ALTER TABLE conversation_members ADD CONSTRAINT conversation_members_role_check
-  CHECK (role IN ('owner', 'member'));
+  CHECK (role IN ('owner', 'admin', 'member'));
 
 -- Per-user "favourite" star on a chat — sidebar filter tab, not a shared
 -- property of the conversation (each member stars it independently).
@@ -674,3 +674,41 @@ CREATE TABLE IF NOT EXISTS announcements (
   created_by uuid REFERENCES users(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- Groups: admins, settings, invite links, communities
+-- ─────────────────────────────────────────────────────────────
+-- role (see conversation_members above): owner (one per group) > admin >
+-- member. Admins add/remove members, approve join requests and change the
+-- group's settings.
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS description text;
+-- Only owner/admins may send (announcement-style groups).
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS only_admins_send boolean NOT NULL DEFAULT false;
+-- Invite link code; people who open it ask to join and an admin approves.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS invite_code text UNIQUE;
+
+CREATE TABLE IF NOT EXISTS group_join_requests (
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id         uuid NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+-- Communities: several groups under one name, plus an announcements group
+-- only admins can post in (a normal group with is_announcement = true).
+CREATE TABLE IF NOT EXISTS communities (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         text NOT NULL,
+  description  text,
+  avatar_color text NOT NULL DEFAULT '#6C5CE7',
+  owner_id     uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS community_id uuid REFERENCES communities(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_announcement boolean NOT NULL DEFAULT false;
+
+-- Polls that close at a set time (or when the creator closes them).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_closes_at timestamptz;
+-- "@everyone" in a group — notifies every member, even with the chat muted.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS mention_all boolean NOT NULL DEFAULT false;

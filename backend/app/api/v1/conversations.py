@@ -29,7 +29,8 @@ WALLPAPER_KEYS = {
 WALLPAPER_FIT_KEYS = {"cover", "contain", "fill", "tile"}
 
 MESSAGE_COLUMNS = """m.id, m.sender_id, m.kind, m.ciphertext, m.iv, m.file_path, m.file_size,
-                     m.created_at, m.edited_at, m.reply_to_id, m.view_once, m.expires_at"""
+                     m.created_at, m.edited_at, m.reply_to_id, m.view_once, m.expires_at,
+                     m.poll_closes_at, m.mention_all"""
 
 
 async def message_extras(message_ids: list[str]) -> tuple[dict, dict, dict]:
@@ -62,7 +63,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
     rows = await query(
         """WITH mine AS (
              SELECT conversation_id, favorite, wallpaper, wallpaper_photo_path, wallpaper_fit,
-                    muted, cleared_at, hidden_at
+                    muted, cleared_at, hidden_at, role
                FROM conversation_members WHERE user_id = $1
            ),
            peer AS (
@@ -107,6 +108,9 @@ async def list_conversations(user_id: str = Depends(require_auth)):
            )
            SELECT c.id, c.kind, c.title, c.avatar_color AS group_avatar_color,
                   c.status, c.requested_by, c.disappear_seconds, c.pinned_message_id, c.pinned_by,
+                  c.description, c.only_admins_send, c.invite_code, c.community_id, c.is_announcement,
+                  mm.role AS my_role,
+                  (SELECT count(*) FROM group_join_requests jr WHERE jr.conversation_id = c.id) AS join_requests,
                   p.id AS peer_id, p.username AS peer_username,
                   p.display_name AS peer_name, p.avatar_color AS peer_color,
                   p.about AS peer_about, p.photo_path AS peer_photo_path,
@@ -277,12 +281,12 @@ async def add_member(conversation_id: str, request: Request, user_id: str = Depe
     wrapped_key = body.get("wrappedKey")
     wrapped_iv = body.get("wrappedIv")
 
-    owner = await one(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2 AND role = 'owner'",
+    admin = await one(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2 AND role IN ('owner', 'admin')",
         conversation_id, user_id,
     )
-    if not owner:
-        raise HTTPException(403, "Only the group owner can add members.")
+    if not admin:
+        raise HTTPException(403, "Only group admins can add members.")
     if not target_user_id or not wrapped_key or not wrapped_iv:
         raise HTTPException(400, "Missing member or key data.")
 
@@ -302,22 +306,46 @@ async def add_member(conversation_id: str, request: Request, user_id: str = Depe
                  SET wrapped_key = EXCLUDED.wrapped_key, wrapped_iv = EXCLUDED.wrapped_iv, wrapped_by = EXCLUDED.wrapped_by""",
             conversation_id, target_user_id, wrapped_key, wrapped_iv, user_id,
         )
+        # An approved join request is done with.
+        await conn.execute("DELETE FROM group_join_requests WHERE conversation_id = $1 AND user_id = $2",
+                           conversation_id, target_user_id)
+    await hub.notify_user(target_user_id, {"type": "group-joined", "conversationId": conversation_id})
+    for uid in await hub.member_ids(conversation_id):
+        await hub.notify_user(uid, {"type": "members-changed", "conversationId": conversation_id})
     return {"ok": True}
 
 
 @router.delete("/{conversation_id}/members/{target_user_id}")
 async def remove_member(conversation_id: str, target_user_id: str, user_id: str = Depends(require_auth)):
     if target_user_id != user_id:
-        owner = await one(
-            "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2 AND role = 'owner'",
-            conversation_id, user_id,
-        )
-        if not owner:
-            raise HTTPException(403, "Only the group owner can remove members.")
+        roles = {r["user_id"]: r["role"] for r in await query(
+            "SELECT user_id::text, role FROM conversation_members WHERE conversation_id = $1 AND user_id = ANY($2::uuid[])",
+            conversation_id, [user_id, target_user_id],
+        )}
+        mine, theirs = roles.get(str(user_id)), roles.get(str(target_user_id))
+        if mine not in ("owner", "admin"):
+            raise HTTPException(403, "Only group admins can remove members.")
+        if theirs == "owner" or (theirs == "admin" and mine != "owner"):
+            raise HTTPException(403, "Only the owner can remove an admin, and the owner can't be removed.")
+    else:
+        me = await one("SELECT role FROM conversation_members WHERE conversation_id = $1 AND user_id = $2", conversation_id, user_id)
+        if me and me["role"] == "owner":
+            # Leaving owner hands the group to its longest-serving admin (or member).
+            heir = await one(
+                """SELECT user_id FROM conversation_members WHERE conversation_id = $1 AND user_id <> $2
+                    ORDER BY (role = 'admin') DESC, joined_at LIMIT 1""",
+                conversation_id, user_id,
+            )
+            if heir:
+                await execute("UPDATE conversation_members SET role = 'owner' WHERE conversation_id = $1 AND user_id = $2",
+                              conversation_id, heir["user_id"])
 
     async with transaction() as conn:
         await conn.execute("DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2", conversation_id, target_user_id)
         await conn.execute("DELETE FROM group_keys WHERE conversation_id = $1 AND user_id = $2", conversation_id, target_user_id)
+    await hub.notify_user(target_user_id, {"type": "group-left", "conversationId": conversation_id})
+    for uid in await hub.member_ids(conversation_id):
+        await hub.notify_user(uid, {"type": "members-changed", "conversationId": conversation_id})
     return {"ok": True}
 
 
@@ -332,7 +360,7 @@ async def list_members(conversation_id: str, user_id: str = Depends(require_auth
              FROM conversation_members cm
              JOIN users u ON u.id = cm.user_id
             WHERE cm.conversation_id = $1
-            ORDER BY (cm.role = 'owner') DESC, u.display_name""",
+            ORDER BY (cm.role = 'owner') DESC, (cm.role = 'admin') DESC, u.display_name""",
         conversation_id,
     )
     return {"members": [{

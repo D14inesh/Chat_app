@@ -1,7 +1,7 @@
 // One import point for app.js. Each feature lives in its own module here.
 
 export { bindFeatures, prefs } from './core.js';
-export { pollBody, pollPreview, wirePolls, onPollVotes, openPollComposer } from './polls.js';
+export { pollBody, pollPreview, wirePolls, onPollVotes, openPollComposer, onPollClosed } from './polls.js';
 export { pinButtonHtml, wirePinButtons, renderPinnedBar, onMessagePinned, isPinned } from './pins.js';
 export {
   expiryMark, renderDisappearingChip, disappearingNoteHtml, openDisappearingPicker,
@@ -32,6 +32,8 @@ import { onDisappearingChanged } from './disappearing.js';
 import { onViewOnceOpened } from './viewonce.js';
 import { onLoginAlert } from './security.js';
 import { onAnnouncement } from './admin.js';
+import { onGroupFrame } from './groups.js';
+import { onPollClosed } from './polls.js';
 
 /** Live frames for the newer features. Returns true when handled. */
 export function handleFeatureFrame(frame) {
@@ -42,9 +44,16 @@ export function handleFeatureFrame(frame) {
     case 'view-once-opened': onViewOnceOpened(frame); return true;
     case 'login-alert': onLoginAlert(frame); return true;
     case 'announcement': onAnnouncement(frame); return true;
-    default: return false;
+    case 'poll-closed': onPollClosed(frame); return true;
+    default: return onGroupFrame(frame);
   }
 }
 export { contactFieldsHtml, wireContactFields, openContactPanel, ensureContact } from './contact.js';
 export { openAnnouncements, onAnnouncement, refreshAnnouncementBadge, openAdminPanel, showAdminEntry } from './admin.js';
 export { openRecoveryKeySetup, nudgeRecoveryKey, openForgotPassword } from './recovery.js';
+export {
+  openGroupInfo, renderComposerLock, onChatOpened, iAmGroupAdmin, addMembersWithKey,
+  mentionsEveryone, highlightEveryone, onComposerMention,
+  splitPrivateReply, textOf, privateQuoteHtml, privateReplyButtonHtml, replyPrivately, packPrivateReply,
+  checkInviteHash, openJoinWithLink, openJoinPreview, openCommunities,
+} from './groups.js';

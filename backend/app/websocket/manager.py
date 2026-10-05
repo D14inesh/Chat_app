@@ -40,7 +40,8 @@ MAX_POLL_OPTIONS = 12
 _EXPIRES_SQL = """(SELECT CASE WHEN disappear_seconds > 0
                                THEN now() + make_interval(secs => disappear_seconds) END
                      FROM conversations WHERE id = $1)"""
-_MESSAGE_COLUMNS = "id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id, view_once, expires_at"
+_MESSAGE_COLUMNS = ("id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id, view_once, "
+                    "expires_at, poll_closes_at, mention_all")
 
 # conversationId -> {userId: WebSocket} — group call seat map. Guarded by
 # _group_call_lock (see on_group_call_join) so the "who's here / evict my
@@ -211,6 +212,8 @@ async def dispatch(ws: WebSocket, user_id: str, msg: dict):
         return await on_game_signal(ws, user_id, msg)
     if t == "poll-vote":
         return await on_poll_vote(ws, user_id, msg)
+    if t == "close-poll":
+        return await on_close_poll(ws, user_id, msg)
     if t == "pin-message":
         return await on_pin_message(ws, user_id, msg)
     if t == "set-disappearing":
@@ -248,6 +251,22 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
         other_id = next((i for i in ctx["memberIds"] if i != user_id), None)
         if other_id and await is_blocked_either_way(user_id, other_id):
             return await send(ws, {"type": "error", "error": "You can no longer message this person.", "tempId": temp_id})
+    if ctx["onlyAdminsSend"] and not is_group_admin(ctx, user_id):
+        return await send(ws, {"type": "error", "error": "Only admins can send messages in this group.", "tempId": temp_id})
+
+    # Poll deadline (plain, so the server can stop late votes).
+    poll_closes_at = None
+    if kind == "poll" and msg.get("pollClosesAt"):
+        try:
+            poll_closes_at = datetime.fromisoformat(str(msg["pollClosesAt"]).replace("Z", "+00:00"))
+        except ValueError:
+            return await send(ws, {"type": "error", "error": "Bad poll deadline", "tempId": temp_id})
+        if poll_closes_at.tzinfo is None:
+            poll_closes_at = poll_closes_at.replace(tzinfo=timezone.utc)
+        if poll_closes_at <= datetime.now(timezone.utc):
+            return await send(ws, {"type": "error", "error": "Pick a closing time in the future.", "tempId": temp_id})
+    # "@everyone" — groups only, owner/admins only.
+    mention_all = bool(msg.get("mentionAll")) and is_group_admin(ctx, user_id)
 
     valid_reply_to_id = None
     if reply_to_id:
@@ -262,10 +281,11 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
     async with transaction() as conn:
         row = await conn.fetchrow(
             f"""INSERT INTO messages (conversation_id, sender_id, kind, ciphertext, iv, file_path, file_size,
-                                      reply_to_id, view_once, expires_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, {_EXPIRES_SQL})
+                                      reply_to_id, view_once, poll_closes_at, mention_all, expires_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, {_EXPIRES_SQL})
                RETURNING {_MESSAGE_COLUMNS}""",
             conversation_id, user_id, kind, ciphertext, iv, file_path, file_size, valid_reply_to_id, view_once,
+            poll_closes_at, mention_all,
         )
         row = dict(row)
         for rid in recipients:
@@ -436,6 +456,8 @@ async def on_poll_vote(ws: WebSocket, user_id: str, msg: dict):
     target = await _message_in(conversation_id, message_id)
     if not target or target["kind"] != "poll":
         return
+    if target["poll_closes_at"] and target["poll_closes_at"] <= datetime.now(timezone.utc):
+        return await send(ws, {"type": "error", "error": "This poll has closed."})
     try:
         picked = sorted({int(c) for c in choices})
     except (TypeError, ValueError):
@@ -455,6 +477,28 @@ async def on_poll_vote(ws: WebSocket, user_id: str, msg: dict):
     votes = await poll_votes(message_id)
     for rid in ctx["memberIds"]:
         await fanout(rid, {"type": "poll-votes", "conversationId": conversation_id, "messageId": message_id, "votes": votes})
+
+
+async def on_close_poll(ws: WebSocket, user_id: str, msg: dict):
+    """The poll's creator (or a group admin) closes it now."""
+    conversation_id = msg.get("conversationId")
+    message_id = msg.get("messageId")
+    ctx = await conversation_context(conversation_id) if conversation_id else None
+    if not ctx or user_id not in ctx["memberIds"]:
+        return
+    target = await _message_in(conversation_id, message_id)
+    if not target or target["kind"] != "poll":
+        return
+    if target["sender_id"] != user_id and not is_group_admin(ctx, user_id):
+        return await send(ws, {"type": "error", "error": "Only the person who made the poll can close it."})
+    row = await one(
+        """UPDATE messages SET poll_closes_at = LEAST(coalesce(poll_closes_at, now()), now())
+            WHERE id = $1 RETURNING poll_closes_at""",
+        message_id,
+    )
+    for rid in ctx["memberIds"]:
+        await fanout(rid, {"type": "poll-closed", "conversationId": conversation_id, "messageId": message_id,
+                           "closesAt": row["poll_closes_at"]})
 
 
 async def on_pin_message(ws: WebSocket, user_id: str, msg: dict):
@@ -758,7 +802,7 @@ async def member_ids(conversation_id: str) -> list[str]:
 
 async def conversation_context(conversation_id: str) -> dict | None:
     rows = await query(
-        """SELECT cm.user_id, c.kind, c.status, c.requested_by
+        """SELECT cm.user_id, cm.role, c.kind, c.status, c.requested_by, c.only_admins_send
              FROM conversation_members cm
              JOIN conversations c ON c.id = cm.conversation_id
             WHERE cm.conversation_id = $1""",
@@ -771,7 +815,13 @@ async def conversation_context(conversation_id: str) -> dict | None:
         "kind": rows[0]["kind"],
         "status": rows[0]["status"],
         "requestedBy": rows[0]["requested_by"],
+        "roles": {r["user_id"]: r["role"] for r in rows},
+        "onlyAdminsSend": bool(rows[0]["only_admins_send"]),
     }
+
+
+def is_group_admin(ctx: dict, user_id: str) -> bool:
+    return ctx["kind"] == "group" and ctx["roles"].get(user_id) in ("owner", "admin")
 
 
 def blocked_by_pending_request(ctx: dict, user_id: str) -> bool:

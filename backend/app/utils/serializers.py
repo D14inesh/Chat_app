@@ -46,6 +46,14 @@ def shape_conversation(r: dict) -> dict:
             "title": r.get("title"),
             "avatarColor": r.get("group_avatar_color"),
             "memberCount": int(r.get("member_count") or 0),
+            "description": r.get("description") or "",
+            "onlyAdminsSend": bool(r.get("only_admins_send")),
+            "myRole": r.get("my_role") or "member",
+            # Admins only: the invite link code and waiting join requests.
+            "inviteCode": r.get("invite_code") if r.get("my_role") in ("owner", "admin") else None,
+            "joinRequests": int(r.get("join_requests") or 0) if r.get("my_role") in ("owner", "admin") else 0,
+            "communityId": r.get("community_id"),
+            "isAnnouncement": bool(r.get("is_announcement")),
         }
 
     return {
@@ -88,6 +96,10 @@ def shape_message(r: dict, reactions: list | None = None, votes: list | None = N
         "openedBy": opened_by or [],
         # Disappearing messages: when it vanishes (null = never).
         "expiresAt": r.get("expires_at"),
+        # Polls with a deadline (or closed by their creator).
+        "pollClosesAt": r.get("poll_closes_at"),
+        # "@everyone" in a group.
+        "mentionAll": bool(r.get("mention_all")),
     }
 
 
