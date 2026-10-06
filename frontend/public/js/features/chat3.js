@@ -3,6 +3,7 @@
 
 import { app, icon, openModal, whenText } from './core.js';
 import { decryptText } from '../crypto.js';
+import { setPrivateLock } from './privacy.js';
 
 // ── Voice messages: one player for the whole app ─────────────
 // Keeps playing while you scroll or switch chats; a mini-player bar shows
@@ -282,6 +283,8 @@ export async function canOpenChat(convo) {
 
 export async function toggleChatLock(convo) {
   if (!convo) return;
+  // All 1-to-1 chats are already behind the PIN — manage that setting instead.
+  if (convo.kind === 'direct' && app.state.me.privateLock) { openChatLockSettings(); return; }
   if (!convo.locked) {
     if (!(await loadPinState())) {
       if (!(await setUpPin())) return;
@@ -308,21 +311,48 @@ export async function toggleChatLock(convo) {
 /** Security & logins: change PIN / turn chat lock off. */
 export async function openChatLockSettings() {
   if (!(await loadPinState())) {
-    if (await setUpPin()) app.toast('Chat lock PIN saved. Lock a chat from its ⋮ menu.');
-    return;
+    if (!(await setUpPin())) return;
+    app.toast('Chat lock PIN saved.');
   }
+  const privateOn = !!app.state.me.privateLock;
   const { box, close } = openModal(`
     <div class="feature-hero">
       <div class="feature-hero-icon">${icon('lock')}</div>
       <h3>Chat lock</h3>
-      <p>Lock a chat from its ⋮ menu. Locked chats hide behind “Locked chats” and your PIN, on every device.</p>
+      <p>Locked chats hide behind “Locked chats” and your PIN, on every device. Lock one chat from its ⋮ menu — or all of your 1-to-1 chats at once:</p>
     </div>
+    <label class="toggle-row">
+      <span><span class="toggle-title">Private chats PIN</span>
+      <span class="toggle-sub">Every 1-to-1 chat needs your PIN to open</span></span>
+      <input type="checkbox" class="switch" id="cl-private" ${privateOn ? 'checked' : ''}>
+    </label>
     <div class="modal-actions">
       <button type="button" class="btn-danger-soft" id="cl-off">Turn off</button>
       <button type="button" class="btn-secondary" id="cl-change">Change PIN</button>
       <button type="button" class="btn-primary" data-close>Done</button>
     </div>`, { cardClass: 'feature-card' });
   box.querySelector('[data-close]').addEventListener('click', close);
+  box.querySelector('#cl-private').addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    try {
+      if (on) {
+        await setPrivateLock(true);
+        unlockedUntil = 0;
+        app.closeActiveChat();
+        app.toast('Your 1-to-1 chats are now behind your PIN.');
+      } else {
+        const p = pinDialog({ title: 'Turn off private chats PIN', sub: 'Enter your PIN.' });
+        pinDialog.last.setCheck(async ({ pin, fail }) => {
+          try { await setPrivateLock(false, pin); return true; } catch (err) { fail(err.message); return false; }
+        });
+        if (!(await p)) { e.target.checked = true; return; }
+        app.toast('Private chats PIN is off.');
+      }
+    } catch (err) {
+      e.target.checked = !on;
+      app.toast(err.message, true);
+    }
+  });
   box.querySelector('#cl-change').addEventListener('click', async () => {
     close();
     const p = pinDialog({ title: 'Change PIN', sub: 'Enter your current PIN, then the new one.', confirm: true, current: true });

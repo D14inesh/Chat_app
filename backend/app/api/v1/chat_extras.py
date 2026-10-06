@@ -98,7 +98,28 @@ async def remove_pin(request: Request, user_id: str = Depends(require_auth)):
     await _check_pin(user_id, (await request.json()).get("pin"))
     await execute("UPDATE users SET chat_lock_pin_hash = NULL WHERE id = $1", user_id)
     await execute("UPDATE conversation_members SET locked = false WHERE user_id = $1", user_id)
+    await execute("UPDATE users SET private_lock = false WHERE id = $1", user_id)
     return {"hasPin": False}
+
+
+@router.get("/api/chat-lock/private")
+async def private_status(user_id: str = Depends(require_auth)):
+    row = await one("SELECT private_lock, chat_lock_pin_hash IS NOT NULL AS has_pin FROM users WHERE id = $1", user_id)
+    return {"enabled": bool(row["private_lock"]), "hasPin": bool(row["has_pin"])}
+
+
+@router.patch("/api/chat-lock/private")
+async def set_private(request: Request, user_id: str = Depends(require_auth)):
+    """All 1-to-1 chats behind the PIN. Turning it off needs the PIN."""
+    body = await request.json()
+    enabled = bool(body.get("enabled"))
+    has = await one("SELECT chat_lock_pin_hash IS NOT NULL AS ok FROM users WHERE id = $1", user_id)
+    if not has["ok"]:
+        raise HTTPException(400, "Set a chat lock PIN first.")
+    if not enabled:
+        await _check_pin(user_id, body.get("pin"))
+    await execute("UPDATE users SET private_lock = $2 WHERE id = $1", user_id, enabled)
+    return {"enabled": enabled}
 
 
 @router.patch("/api/conversations/{conversation_id}/lock")

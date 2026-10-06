@@ -791,3 +791,14 @@ CREATE TABLE IF NOT EXISTS chat_notes (
   updated_at      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, conversation_id)
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- Age (18+ for 1-to-1 chats), private-chats PIN, archive
+-- ─────────────────────────────────────────────────────────────
+-- Date of birth, asked at sign-up (existing accounts are asked once).
+-- 1-to-1 chats and calls are only for people 18 and over; under-18s use groups.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date date;
+-- "Private chats PIN": every 1-to-1 chat sits behind the chat-lock PIN.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS private_lock boolean NOT NULL DEFAULT false;
+-- Archived chats leave the main list (per person) and stay archived, silently.
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;

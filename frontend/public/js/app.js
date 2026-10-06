@@ -90,7 +90,7 @@ const APPEARANCE_ALLOWED = {
 };
 // Browser-chrome colour — matches --bg for each palette/mode.
 const THEME_COLORS = {
-  'veyon:dark': '#0A0E1F',    'veyon:light': '#F2F6FF',
+  'veyon:dark': '#0e0f11',    'veyon:light': '#f3f2ef',
   'aurora:dark': '#08090F',   'aurora:light': '#F3F3FB',
   'obsidian:dark': '#0A0A0B', 'obsidian:light': '#F1EEE7',
   'nord:dark': '#2E3440',     'nord:light': '#E5E9F0',
@@ -297,6 +297,8 @@ $('auth-form').addEventListener('submit', async (e) => {
 
   try {
     if (authMode === 'register') {
+      const birthDate = $('f-birth').value;
+      if (!birthDate) throw new Error('Enter your date of birth.');
       const contact = readSignupContact();
       if (!contact.otp) throw new Error('Tap “Send code”, then enter the 6-digit code from your Gmail.');
       btn.textContent = 'Generating keys…';
@@ -310,7 +312,7 @@ $('auth-form').addEventListener('submit', async (e) => {
       btn.textContent = 'Creating account…';
       const { user } = await api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ username, displayName, password, publicKey, encPrivateKey, ...contact }),
+        body: JSON.stringify({ username, displayName, password, publicKey, encPrivateKey, birthDate, ...contact }),
       });
 
       state.privateKey = keyPair.privateKey;
@@ -569,8 +571,8 @@ async function completeDeviceLink(code, box) {
 $('me-avatar').addEventListener('click', openEditProfile);
 
 const PALETTE_META = [
-  { key: 'veyon',    name: 'Veyon Current',   desc: 'Deep indigo glass, electric blue-to-cyan signal',
-    sw: ['#0A0E1F', '#2F6BFF', '#00C2FF', '#2EE6A6'] },
+  { key: 'veyon',    name: 'Veyon',           desc: 'Calm stone and indigo — soft and rounded, light or dark',
+    sw: ['#f3f2ef', '#e3e9ff', '#4263eb', '#12b886'] },
   { key: 'aurora',   name: 'Aurora Glass',    desc: 'Frosted panels over a teal–violet aurora',
     sw: ['#08090F', '#7C5CFF', '#22D3EE', '#EC4899'] },
   { key: 'obsidian', name: 'Obsidian & Gold', desc: 'True black, warm charcoal, champagne gold',
@@ -785,17 +787,15 @@ async function enterApp(user) {
   F.startExpiryWatcher();  // hides disappearing messages the moment they expire
   connectSocket();         // its 'open' handler flushes the outbox
   F.ensureContact(user);   // older accounts: add a mobile number + Gmail once
-  F.showAdminEntry(user);
-  F.refreshAnnouncementBadge();
+  F.ensureBirthDate(user); // …and a date of birth (1-to-1 chats are 18+)
   F.nudgeRecoveryKey(user);
   F.checkInviteHash();     // opened from a group invite link
   F.refreshMissedCalls();
 
-  // Resume "Hey ARM" if it was on before — mirrors how a real assistant
-  // stays armed across app launches once you've turned it on once. If the
-  // mic permission prompt is required again, startVoiceCommandListener()
-  // degrades to a toast instead of throwing, same as toggling it by hand.
-  if (localStorage.getItem(VOICE_COMMANDS_PREF_KEY)) startVoiceCommandListener();
+  // "Hey ARM" is on unless this person turned it off (⋮ → Voice commands).
+  // If mic access is refused, startVoiceCommandListener() just says so.
+  if (voiceCommandsWanted()) startVoiceCommandListener({ quiet: true });
+  else updateVoiceCommandsMenuLabel();
 }
 
 async function loadBlockedIds() {
@@ -1067,8 +1067,12 @@ async function openConversation(id) {
     if (paintedFromCache) {
       toast('Offline — showing your saved copy of this chat.');
     } else {
+      // The browser reports an unreachable server as "Failed to fetch".
+      const why = err instanceof TypeError
+        ? 'Can’t reach the server right now — check your connection, then open the chat again.'
+        : err.message;
       $('messages').innerHTML =
-        `<div class="empty-hint">Could not load this conversation.<br>${escapeHtml(err.message)}</div>`;
+        `<div class="empty-hint">Could not load this conversation.<br>${escapeHtml(why)}</div>`;
     }
   }
 
@@ -1246,15 +1250,17 @@ function renderChatList() {
     const bt = b.lastMessage?.createdAt ?? 0;
     return new Date(bt) - new Date(at);
   });
-  const convos = F.hideLocked(applyChatFilter(all));   // locked chats stay behind the PIN
+  const convos = F.archiveFilter(F.hideLocked(applyChatFilter(all)));   // locked chats behind the PIN; archived apart
 
   if (convos.length === 0) {
-    list.innerHTML = F.lockedRowHtml() + `<div class="empty-hint">${FILTER_EMPTY_HINT[state.chatFilter]}</div>`;
+    list.innerHTML = F.archivedRowHtml() + (F.viewingArchived() ? '<div class="empty-hint">No archived chats.</div>'
+      : F.lockedRowHtml() + `<div class="empty-hint">${FILTER_EMPTY_HINT[state.chatFilter]}</div>`);
     F.wireLockedRow(list);
+    F.wireArchivedRow(list);
     return;
   }
 
-  list.innerHTML = F.lockedRowHtml() + convos.map((c) => {
+  list.innerHTML = F.archivedRowHtml() + (F.viewingArchived() ? '' : F.lockedRowHtml()) + convos.map((c) => {
     const isGroup = c.kind === 'group';
     const entity = isGroup ? { displayName: c.title, avatarColor: c.avatarColor } : c.peer;
     const name = isGroup ? c.title : c.peer.displayName;
@@ -1307,6 +1313,7 @@ function renderChatList() {
   }).join('');
 
   F.wireLockedRow(list);
+  F.wireArchivedRow(list);
   list.querySelectorAll('.chat-item').forEach((el) => {
     el.addEventListener('click', () => {
       if (state.chatSelectMode) toggleChatSelected(el.dataset.id);
@@ -3904,7 +3911,7 @@ async function onIncoming(frame) {
     if (!input.value.trim()) refreshComposerSuggestions();   // fresh quick replies
   } else if (message.senderId !== state.me.id) {
     convo.unread = (convo.unread || 0) + 1;
-    if (!convo.muted || message.mentionAll) notify(convo, message);
+    if ((!convo.muted && !convo.archived) || message.mentionAll) notify(convo, message);
   }
 
   renderChatList();
@@ -6939,6 +6946,7 @@ $('chat-menu').addEventListener('click', (e) => {
   else if (action === 'export') F.openExportChat();
   else if (action === 'lock-chat') F.toggleChatLock(state.conversations.get(state.activeId));
   else if (action === 'notes') F.openChatNotes();
+  else if (action === 'archive') F.toggleArchive(state.conversations.get(state.activeId));
 });
 
 // ── Sidebar overflow menu — starred, select chats, mark all read, app lock ──
@@ -6966,8 +6974,6 @@ $('sidebar-menu').addEventListener('click', (e) => {
   else if (action === 'quick-replies') F.openQuickRepliesPanel();
   else if (action === 'security') F.openSecurityPanel();
   else if (action === 'chat-features') F.openFeatureSettings();
-  else if (action === 'announcements') F.openAnnouncements();
-  else if (action === 'admin') F.openAdminPanel();
   else if (action === 'communities') F.openCommunities();
   else if (action === 'join-link') F.openJoinWithLink();
 });
@@ -8679,8 +8685,14 @@ function openLiveGameModal(title, boardId, controlsId, boardClass = boardId) {
  *  match the currently-open conversation — called right before the menu
  *  becomes visible, so it can't show a stale state. */
 function updateChatMenuLabels() {
+  const archBtn = $('chat-menu')?.querySelector('[data-action="archive"] span');
+  if (archBtn) archBtn.textContent = state.conversations.get(state.activeId)?.archived ? 'Unarchive chat' : 'Archive chat';
   const lockBtn = $('chat-menu')?.querySelector('[data-action="lock-chat"] span');
-  if (lockBtn) lockBtn.textContent = state.conversations.get(state.activeId)?.locked ? 'Remove chat lock' : 'Lock chat';
+  const lockConvo = state.conversations.get(state.activeId);
+  if (lockBtn) {
+    lockBtn.textContent = lockConvo?.kind === 'direct' && state.me?.privateLock ? 'Private chats PIN (on)'
+      : lockConvo?.locked ? 'Remove chat lock' : 'Lock chat';
+  }
   const convo = state.conversations.get(state.activeId);
   if (!convo) return;
   const muteLabel = $('chat-menu-mute-label');
@@ -9195,8 +9207,21 @@ function openAddToListPanel() {
 // trigger just shows the "go ahead…" badge and times out on its own if
 // nothing sensible follows, which is a much cheaper mistake than the
 // command never firing at all.
-const VOICE_WAKE_REGEX = /\bhey,?\s+(?:arm|aarm|umm?|uhm|ahm|am|aam|aum|i'?m|on|ah|art|arn|alm|ma'?am)\b/;
+//
+// Speech engines also often drop "arm" altogether and hand back just "he"
+// or "hey" before the command ("he say hello to manju"), so a hey-like word
+// directly followed by a command verb counts as the wake phrase too.
+const VOICE_HEY = '(?:hey|hay|hei|he|hi|hii|ok|okay|a)';
+const VOICE_ARM = "(?:arm|arms|aarm|harm|ram|alarm|army|am|aam|aum|umm?|uhm|ahm|erm|i'?m|on|ah|art|arn|alm|ma'?am)";
+const VOICE_VERBS = '(?:call|video|say|send|tell|message|msg|open|start|make|please|text)';
+const VOICE_WAKE_REGEX = new RegExp(
+  `\\b(?:${VOICE_HEY}\\s+${VOICE_ARM}|harm|hey\\s*arm|(?:hey|hay|hei|he|hi|hii)(?=\\s+${VOICE_VERBS}\\b))\\b`);
 const VOICE_COMMANDS_PREF_KEY = 'vesper-voice-commands-enabled';
+// 'off' = turned off by hand. Anything else (including never set) = on.
+const voiceCommandsWanted = () => localStorage.getItem(VOICE_COMMANDS_PREF_KEY) !== 'off';
+// Indian English hears Indian names and accents far better than the
+// browser's default US English; other English locales keep their own.
+const VOICE_LANG = /^en-(IN|GB|AU|CA|NZ|IE|ZA|SG)$/i.test(navigator.language) ? navigator.language : 'en-IN';
 
 /** Returns the index right after a recognized wake phrase, or -1. */
 function findWakePhraseEnd(transcript) {
@@ -9209,22 +9234,25 @@ function toggleVoiceCommands() {
   else startVoiceCommandListener();
 }
 
-function startVoiceCommandListener() {
+function startVoiceCommandListener({ quiet = false } = {}) {
   if (!speechToTextSupported()) {
-    toast('Voice commands need a browser with speech recognition (Chrome or Edge).', true);
+    if (!quiet) toast('Voice commands need a browser with speech recognition (Chrome or Edge).', true);
+    updateVoiceCommandsMenuLabel();
     return;
   }
   if (state.voiceCommands.active) return;
   state.voiceCommands.active = true;
-  localStorage.setItem(VOICE_COMMANDS_PREF_KEY, '1');
+  state.voiceCommands.quiet = quiet;   // started automatically: no error toast if the mic is blocked
+  localStorage.setItem(VOICE_COMMANDS_PREF_KEY, 'on');
   updateVoiceCommandsMenuLabel();
-  showVoiceCommandBadge('listening…');
+  showVoiceCommandIdle();
+  if (!quiet) toast('Voice commands on — say "Hey ARM, call Manju".');
   armVoiceRecognizer();
 }
 
-function stopVoiceCommandListener() {
+function stopVoiceCommandListener({ remember = true } = {}) {
   state.voiceCommands.active = false;
-  localStorage.removeItem(VOICE_COMMANDS_PREF_KEY);
+  if (remember) localStorage.setItem(VOICE_COMMANDS_PREF_KEY, 'off');
   updateVoiceCommandsMenuLabel();
   state.voiceCommands.recognizer?.stop();
   state.voiceCommands.recognizer = null;
@@ -9233,7 +9261,11 @@ function stopVoiceCommandListener() {
 
 function updateVoiceCommandsMenuLabel() {
   const label = $('voice-commands-label');
-  if (label) label.textContent = state.voiceCommands.active ? 'Voice commands: ON ("Hey ARM")' : 'Voice commands ("Hey ARM")';
+  if (label) {
+    label.textContent = state.voiceCommands.active
+      ? 'Turn off voice commands ("Hey ARM")'
+      : 'Turn on voice commands ("Hey ARM")';
+  }
 }
 
 /** Loosens exact-string wake-phrase matching just enough to survive the
@@ -9252,39 +9284,51 @@ function armVoiceRecognizer() {
   if (!state.voiceCommands.active) return;
 
   const rec = new SpeechRecognitionCtor();
-  rec.lang = 'en-US';
+  rec.lang = VOICE_LANG;
   rec.continuous = true;
   rec.interimResults = true;
+  rec.maxAlternatives = 5;   // the engine's runner-up guesses often contain the wake phrase
   state.voiceCommands.recognizer = rec;
 
   let silenceTimer = null;
+  let pending = '';   // the command heard so far, waiting for the speaker to pause
+
+  // Runs the waiting command exactly once — from the pause timer, or from
+  // onend if the browser closes the session first (Edge/Chrome often do,
+  // right after the final words; dropping it there is what lost commands).
+  const fire = () => {
+    clearTimeout(silenceTimer);
+    const command = pending;
+    pending = '';
+    if (command) executeVoiceCommand(command);
+  };
 
   rec.onresult = (e) => {
-    let transcript = '';
-    for (let i = 0; i < e.results.length; i++) transcript += e.results[i][0].transcript;
-    transcript = normalizeForWakeMatch(transcript);
+    // Build the transcript from each phrase's best guess, but for the latest
+    // phrase also try every alternative: whichever one contains the wake
+    // phrase wins, so a near-miss on "hey arm" in guess #1 doesn't lose it.
+    let before = '';
+    for (let i = 0; i < e.results.length - 1; i++) before += e.results[i][0].transcript + ' ';
+    const last = e.results[e.results.length - 1];
+    const options = [...Array(last.length).keys()].map((k) => normalizeForWakeMatch(before + last[k].transcript));
+    const transcript = options.find((t) => findWakePhraseEnd(t) !== -1) || options[0];
 
     const wakeEnd = findWakePhraseEnd(transcript);
-    if (wakeEnd === -1) {
-      // Live feedback even before the wake phrase — otherwise the badge
-      // just says "listening" forever with no sign anything's being picked
-      // up at all, which is indistinguishable from the mic being dead.
-      showVoiceCommandBadge(transcript ? `heard: "${transcript}"` : 'listening…');
-      clearTimeout(silenceTimer);
-      return;
-    }
+    // Not for us — ordinary talk near the mic. Stay quiet (but keep any
+    // command already heard; the engine sometimes rewrites its guess).
+    if (wakeEnd === -1) return;
 
-    const command = transcript.slice(wakeEnd).trim();
-    showVoiceCommandBadge(command ? `"${command}"` : 'go ahead…');
+    const command = cleanVoiceCommand(transcript.slice(wakeEnd));
+    pending = command;
+    showVoiceCommandBadge(command ? `"${command}"` : 'Listening — go ahead…');
 
-    // A command is "done" once speech pauses for a bit, not on any fixed
-    // word count — this is the same trailing-silence idea the live
-    // recording transcription already leans on for its own UI feedback.
+    // A command is "done" once speech pauses for a bit, or straight away
+    // once the engine marks the phrase final.
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => {
-      if (command) executeVoiceCommand(command);
+      fire();
       rec.stop(); // -> onend below re-arms with a clean transcript buffer
-    }, 1400);
+    }, last.isFinal ? 700 : 1800);
   };
 
   rec.onerror = (e) => {
@@ -9294,15 +9338,21 @@ function armVoiceRecognizer() {
     // the badge stuck on "listening" forever with no explanation.
     if (e.error === 'no-speech') return;
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      toast('Voice commands need microphone access — check your browser/site permissions.', true);
-      stopVoiceCommandListener();
+      if (!state.voiceCommands.quiet) {
+        toast('Voice commands need microphone access — allow the mic for this site, then turn them on from ⋮.', true);
+      }
+      stopVoiceCommandListener({ remember: false });
     } else if (e.error === 'network') {
       showVoiceCommandBadge('no connection — retrying…');
     }
   };
   rec.onend = () => {
-    clearTimeout(silenceTimer);
-    if (state.voiceCommands.active) armVoiceRecognizer();
+    if (state.voiceCommands.active) fire();
+    else pending = '';
+    if (state.voiceCommands.active) {
+      showVoiceCommandIdle();
+      armVoiceRecognizer();
+    }
   };
 
   try { rec.start(); } catch { /* already starting — ignore */ }
@@ -9316,7 +9366,42 @@ function showVoiceCommandBadge(text) {
     badge.className = 'voice-command-badge';
     document.body.appendChild(badge);
   }
+  badge.classList.remove('idle');
   badge.textContent = `🎙️ ${text}`;
+}
+
+/** While just waiting for "Hey ARM": a small mic dot, not a banner. */
+function showVoiceCommandIdle() {
+  showVoiceCommandBadge('');
+  const badge = $('voice-command-badge');
+  badge.classList.add('idle');
+  badge.textContent = '🎙️';
+  badge.title = 'Voice commands are on — say "Hey ARM". Turn off from ⋮.';
+}
+
+/** Drops leading filler a speech engine adds between the wake phrase and
+ *  the command ("hey arm, can you please call manju"). */
+function cleanVoiceCommand(text) {
+  return text.trim()
+    .replace(/^(?:arm|um+|uh|so|and|ok|okay)\s+/i, '')
+    .replace(/^(?:can you|could you|will you|would you|please|kindly)\s+/i, '')
+    .replace(/^please\s+/i, '')
+    .trim();
+}
+
+/** Edit distance, for names the engine spells a little differently. */
+function editDistance(a, b) {
+  const row = [...Array(b.length + 1).keys()];
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[b.length];
 }
 
 function hideVoiceCommandBadge() {
@@ -9327,12 +9412,39 @@ function hideVoiceCommandBadge() {
  *  match first, then "starts with", then "contains anywhere", since a
  *  transcribed name is rarely spelled/cased exactly like the display name. */
 function findContactByName(name) {
-  const target = name.toLowerCase().trim().replace(/[.,!?]+$/, '');
+  const target = name.toLowerCase().trim().replace(/[.,!?]+$/, '').replace(/^(?:to|with)\s+/, '');
+  if (!target) return null;
   const directChats = [...state.conversations.values()].filter((c) => c.kind === 'direct' && c.peer);
-  return directChats.find((c) => c.peer.displayName.toLowerCase() === target)
-    || directChats.find((c) => c.peer.displayName.toLowerCase().startsWith(target))
-    || directChats.find((c) => c.peer.displayName.toLowerCase().includes(target))
-    || null;
+  const names = (c) => [c.peer.displayName, c.peer.username].filter(Boolean).map((n) => n.toLowerCase());
+  const exact = directChats.find((c) => names(c).includes(target))
+    || directChats.find((c) => names(c).some((n) => n.startsWith(target) || n.split(/\s+/)[0] === target))
+    || directChats.find((c) => names(c).some((n) => n.includes(target)));
+  if (exact) return exact;
+  // Close enough: "manjoo" → Manju, "abhi" → Abi. Compare by sound (see
+  // soundKey) against the full and first name, allowing about one wrong
+  // letter in three.
+  const spoken = soundKey(target);
+  let best = null;
+  let bestScore = Infinity;
+  for (const c of directChats) {
+    for (const n of names(c).flatMap((n) => [n, n.split(/\s+/)[0]])) {
+      const key = soundKey(n);
+      const d = editDistance(spoken, key);
+      if (d <= Math.max(1, Math.round(key.length / 3)) && d < bestScore) { best = c; bestScore = d; }
+    }
+  }
+  return best;
+}
+
+/** A rough "sounds like" spelling, so the way a speech engine writes an
+ *  Indian name ("manjoo", "preeti", "abhi") lines up with how it's saved
+ *  ("Manju", "Priti", "Abi"). */
+function soundKey(name) {
+  return name.toLowerCase()
+    .replace(/[^a-z]/g, '')
+    .replace(/oo|ou/g, 'u').replace(/ee|ea|ie/g, 'i').replace(/aa/g, 'a')
+    .replace(/(?<=[kgcjtdpb])h/g, '').replace(/ph/g, 'f').replace(/w/g, 'v').replace(/z/g, 's')
+    .replace(/(.)\1+/g, '$1');
 }
 
 async function executeVoiceCommand(command) {
@@ -10147,7 +10259,7 @@ $('forgot-password').addEventListener('click', () => F.openForgotPassword((usern
 }));
 
 // Sign-up form: mobile number + Gmail + emailed code.
-$('field-contact').innerHTML = F.contactFieldsHtml();
+$('field-contact').innerHTML = F.birthFieldHtml() + F.contactFieldsHtml();
 const readSignupContact = F.wireContactFields($('field-contact'), '/api/auth/otp', showAuthError);
 
 setAuthMode('login');

@@ -12,13 +12,13 @@
 // shell) with no network, and is also what Chrome/Edge require for the
 // "Install app" prompt to offer itself in the first place. Bumping
 // CACHE_NAME invalidates everything below in one shot on the next deploy.
-const CACHE_NAME = 'veyon-chat-shell-v10';
+const CACHE_NAME = 'veyon-chat-shell-v13';
 const FEATURE_MODULES = [
   'core', 'index', 'polls', 'pins', 'disappearing', 'viewonce', 'drafts', 'export', 'ai-tools',
-  'security', 'quickreplies', 'broadcasts', 'business', 'effects', 'settings', 'games2', 'contact', 'admin', 'recovery', 'groups', 'chat3', 'calls', 'shop',
+  'security', 'quickreplies', 'broadcasts', 'business', 'effects', 'settings', 'games2', 'contact', 'recovery', 'groups', 'chat3', 'calls', 'shop', 'privacy',
 ].map((name) => `/js/features/${name}.js`);
 const SHELL_ASSETS = [
-  '/', '/config.js', '/css/theme.css', '/css/features.css',
+  '/', '/config.js', '/css/theme.css', '/css/features.css', '/css/ui.css',
   '/js/app.js', '/js/crypto.js', '/js/localstore.js', '/manifest.json',
   ...FEATURE_MODULES,
 ];

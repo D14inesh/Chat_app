@@ -16,10 +16,11 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.security import COOKIE_NAME, verify_session_live
 from app.core.database import is_blocked_either_way, one, query, transaction
+from app.utils.age import require_direct_allowed
 from app.utils.serializers import shape_message
 
 # userId -> set[WebSocket] — a Set, not a single socket, so the same account
@@ -258,6 +259,11 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
         other_id = next((i for i in ctx["memberIds"] if i != user_id), None)
         if other_id and await is_blocked_either_way(user_id, other_id):
             return await send(ws, {"type": "error", "error": "You can no longer message this person.", "tempId": temp_id})
+        if other_id:
+            try:
+                await require_direct_allowed(user_id, other_id)
+            except HTTPException as e:
+                return await send(ws, {"type": "error", "error": e.detail, "tempId": temp_id})
     if ctx["onlyAdminsSend"] and not is_group_admin(ctx, user_id):
         return await send(ws, {"type": "error", "error": "Only admins can send messages in this group.", "tempId": temp_id})
 
@@ -653,6 +659,10 @@ async def on_call_offer(ws: WebSocket, user_id: str, msg: dict):
         return await send(ws, {"type": "call-error", "conversationId": conversation_id, "error": "Accept the request before you can call."})
     if await is_blocked_either_way(user_id, to_user_id):
         return await send(ws, {"type": "call-error", "conversationId": conversation_id, "error": "You can no longer call this person."})
+    try:
+        await require_direct_allowed(user_id, to_user_id)
+    except HTTPException as e:
+        return await send(ws, {"type": "call-error", "conversationId": conversation_id, "error": e.detail})
 
     await log_call_offer(conversation_id, user_id, to_user_id, call_type)
     await fanout(to_user_id, {"type": "call-offer", "conversationId": conversation_id, "fromUserId": user_id, "callType": call_type, "sdp": sdp})

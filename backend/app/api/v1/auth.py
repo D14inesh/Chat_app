@@ -18,6 +18,7 @@ from app.core.database import one, query
 from app.utils.devices import (
     bind_device, client_ip, device_id, device_label, device_owner, device_taken_message,
 )
+from app.utils.age import is_adult, parse_birth_date
 from app.utils.otp import check_code, ensure_contact_free, normalize_phone, read_contact, send_code
 from app.utils.serializers import shape_user
 
@@ -87,6 +88,7 @@ async def register(request: Request, response: Response):
         raise HTTPException(409, "That username is already taken.")
 
     # One account per mobile number and per email; the email code proves the Gmail.
+    birth = parse_birth_date(body.get("birthDate"))
     phone, email = read_contact(body)
     await ensure_contact_free(phone, email)
     await check_code(phone, email, "register", body.get("otp"))
@@ -97,11 +99,11 @@ async def register(request: Request, response: Response):
     try:
         user = await one(
             """INSERT INTO users (username, username_lower, display_name, password_hash,
-                                  avatar_color, public_key, enc_private_key, phone, email, email_verified_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                                  avatar_color, public_key, enc_private_key, phone, email, email_verified_at, birth_date)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
                RETURNING id, username, display_name, avatar_color, about, appearance""",
             username, lower, (display_name or username).strip()[:60], hash_, color, public_key, enc_private_key,
-            phone, email,
+            phone, email, birth,
         )
     except asyncpg.UniqueViolationError:
         raise HTTPException(409, "That username, mobile number or email was just taken.")
@@ -109,7 +111,7 @@ async def register(request: Request, response: Response):
     await bind_device(dev, user["id"], device_label(request))
     set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
     await record_login(user["id"], request, "register")
-    return {"user": with_contact(shape_user(user), {"phone": phone, "email": email, "email_verified_at": True})}
+    return {"user": with_contact(shape_user(user), {"phone": phone, "email": email, "email_verified_at": True, "birth_date": birth})}
 
 
 @router.post("/login")
@@ -123,7 +125,7 @@ async def login(request: Request, response: Response):
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance,
                   password_hash, enc_private_key, phone, email, email_verified_at,
-                  is_admin, enc_private_key_recovery, disabled_at
+                  enc_private_key_recovery, disabled_at, birth_date, private_lock
              FROM users WHERE username_lower = $1 OR phone = $2 OR lower(email) = $1
             ORDER BY (username_lower = $1) DESC LIMIT 1""",
         ident, normalize_phone(ident) or "",
@@ -158,8 +160,12 @@ def with_contact(user: dict, row: dict) -> dict:
     user["phone"] = row.get("phone")
     user["email"] = row.get("email")
     user["contactVerified"] = bool(row.get("phone") and row.get("email_verified_at"))
-    user["isAdmin"] = bool(row.get("is_admin"))
     user["hasRecoveryKey"] = bool(row.get("enc_private_key_recovery"))
+    birth = row.get("birth_date")
+    user["birthDate"] = birth.isoformat() if birth else None
+    # 1-to-1 chats and calls are for 18+ (see utils/age.py).
+    user["isAdult"] = is_adult(birth)
+    user["privateLock"] = bool(row.get("private_lock"))
     return user
 
 
@@ -173,7 +179,8 @@ async def logout(request: Request, response: Response):
 async def get_me(request: Request, response: Response, uid: str = Depends(require_auth)):
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business,
-                  phone, email, email_verified_at, is_admin, enc_private_key_recovery, disabled_at
+                  phone, email, email_verified_at, enc_private_key_recovery, disabled_at,
+                  birth_date, private_lock
              FROM users WHERE id = $1""",
         uid,
     )
@@ -201,6 +208,18 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
     # instead of being thrown out SESSION_TTL after their original login.
     set_session_cookie(response, sign_session(uid, await session_epoch(uid)), request)
     return {"user": user, "encPrivateKey": row["enc_private_key"]}
+
+
+@router.post("/birth-date")
+async def set_birth_date(request: Request, uid: str = Depends(require_auth)):
+    """Accounts made before the age rule add their date of birth — once."""
+    birth = parse_birth_date((await request.json()).get("birthDate"))
+    row = await one(
+        "UPDATE users SET birth_date = $2 WHERE id = $1 AND birth_date IS NULL RETURNING birth_date", uid, birth,
+    )
+    if not row:
+        raise HTTPException(400, "Your date of birth is already saved and can't be changed.")
+    return {"birthDate": birth.isoformat(), "isAdult": is_adult(birth)}
 
 
 @router.post("/recovery-key")
@@ -237,7 +256,7 @@ async def _reset_target(ident) -> dict:
     if row["disabled_at"]:
         raise HTTPException(403, "This account has been suspended by the admin.")
     if not (row["phone"] and row["email"] and row["email_verified_at"]):
-        raise HTTPException(400, "This account has no verified Gmail, so its password can't be reset by code. Ask the admin for help.")
+        raise HTTPException(400, "This account has no verified Gmail, so its password can't be reset by code. Use your recovery key instead.")
     return row
 
 

@@ -99,7 +99,7 @@ def _send_mail(to: str, code: str):
 async def send_code(phone: str, email: str, purpose: str) -> dict:
     """Emails a fresh code. Returns {sent: True} (+ devCode in dev mode)."""
     if not mail_ready() and not config.OTP_DEV_MODE:
-        raise HTTPException(503, "Email codes aren't set up on the server yet — ask the admin to add the Gmail settings.")
+        raise HTTPException(503, "Email codes aren't set up on the server yet — the server owner needs to add the Gmail settings.")
 
     recent = await one(
         """SELECT count(*) AS n,

@@ -125,3 +125,4 @@ async def optional_auth(vesper_session: str | None = Cookie(default=None)) -> st
     """Same lookup, but never raises — for the WebSocket upgrade handshake,
     which closes the socket itself (code 4001) instead of an HTTP 401."""
     return verify_session(vesper_session)
+

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.core.security import require_auth
 from app.core.config import WALLPAPER_DIR
 from app.core.database import are_accepted_contacts, execute, is_blocked_either_way, one, query, row_count, transaction
+from app.utils.age import require_direct_allowed
 from app.utils.serializers import shape_conversation, shape_message
 from app.websocket import manager as hub
 
@@ -63,7 +64,7 @@ async def list_conversations(user_id: str = Depends(require_auth)):
     rows = await query(
         """WITH mine AS (
              SELECT conversation_id, favorite, wallpaper, wallpaper_photo_path, wallpaper_fit,
-                    muted, cleared_at, hidden_at, role, locked
+                    muted, cleared_at, hidden_at, role, locked, archived
                FROM conversation_members WHERE user_id = $1
            ),
            peer AS (
@@ -121,7 +122,9 @@ async def list_conversations(user_id: str = Depends(require_auth)):
                   lm.iv AS last_iv, lm.created_at AS last_at,
                   lm.delivered_at AS last_delivered, lm.read_at AS last_read, lm.view_once AS last_view_once,
                   COALESCE(un.n, 0) AS unread,
-                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted, mm.locked
+                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted, mm.archived,
+                  -- "Private chats PIN" puts every 1-to-1 chat behind the chat lock.
+                  (mm.locked OR (c.kind = 'direct' AND (SELECT private_lock FROM users WHERE id = $1))) AS locked
              FROM conversations c
              LEFT JOIN mine mm       ON mm.conversation_id = c.id
              LEFT JOIN peer p        ON p.conversation_id = c.id
@@ -130,6 +133,8 @@ async def list_conversations(user_id: str = Depends(require_auth)):
              LEFT JOIN unread un     ON un.conversation_id = c.id
             WHERE c.id IN (SELECT conversation_id FROM mine)
               AND (mm.hidden_at IS NULL OR lm.created_at > mm.hidden_at)
+              -- Under-18s (or no date of birth yet) don't see 1-to-1 chats.
+              AND (c.kind <> 'direct' OR (SELECT birth_date <= (current_date - interval '18 years') FROM users WHERE id = $1))
             ORDER BY COALESCE(lm.created_at, c.created_at) DESC""",
         user_id,
     )
@@ -169,6 +174,7 @@ async def open_direct(request: Request, user_id: str = Depends(require_auth)):
 
     if await is_blocked_either_way(user_id, peer_id):
         raise HTTPException(403, "You can't start a chat with this person.")
+    await require_direct_allowed(user_id, peer_id)
 
     direct_key = ":".join(sorted([user_id, peer_id]))
 
@@ -382,6 +388,18 @@ async def set_favorite(conversation_id: str, request: Request, user_id: str = De
     if not row_count(status):
         raise HTTPException(403, "Not your conversation.")
     return {"favorite": favorite}
+
+
+@router.patch("/{conversation_id}/archive")
+async def set_archived(conversation_id: str, request: Request, user_id: str = Depends(require_auth)):
+    body = await request.json()
+    row = await one(
+        "UPDATE conversation_members SET archived = $3 WHERE conversation_id = $1 AND user_id = $2 RETURNING archived",
+        conversation_id, user_id, bool(body.get("archived")),
+    )
+    if not row:
+        raise HTTPException(404, "No such conversation.")
+    return {"archived": row["archived"]}
 
 
 @router.patch("/{conversation_id}/mute")

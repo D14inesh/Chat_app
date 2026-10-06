@@ -31,7 +31,6 @@ import { onMessagePinned } from './pins.js';
 import { onDisappearingChanged } from './disappearing.js';
 import { onViewOnceOpened } from './viewonce.js';
 import { onLoginAlert } from './security.js';
-import { onAnnouncement } from './admin.js';
 import { onGroupFrame } from './groups.js';
 import { onPollClosed } from './polls.js';
 import { onCallLog } from './calls.js';
@@ -44,14 +43,12 @@ export function handleFeatureFrame(frame) {
     case 'disappearing-changed': onDisappearingChanged(frame); return true;
     case 'view-once-opened': onViewOnceOpened(frame); return true;
     case 'login-alert': onLoginAlert(frame); return true;
-    case 'announcement': onAnnouncement(frame); return true;
     case 'poll-closed': onPollClosed(frame); return true;
     case 'call-log': onCallLog(frame); return true;
     default: return onGroupFrame(frame);
   }
 }
 export { contactFieldsHtml, wireContactFields, openContactPanel, ensureContact } from './contact.js';
-export { openAnnouncements, onAnnouncement, refreshAnnouncementBadge, openAdminPanel, showAdminEntry } from './admin.js';
 export { openRecoveryKeySetup, nudgeRecoveryKey, openForgotPassword } from './recovery.js';
 export {
   openGroupInfo, renderComposerLock, onChatOpened, iAmGroupAdmin, addMembersWithKey,
@@ -74,3 +71,6 @@ export {
   productBody, productPreview, autoBody, openCatalogue, openSendProduct, openCatalogManager,
   openAwaySettings, openChatNotes, priceText,
 } from './shop.js';
+export {
+  birthFieldHtml, ensureBirthDate, setPrivateLock, archiveFilter, archivedRowHtml, wireArchivedRow, toggleArchive, viewingArchived,
+} from './privacy.js';

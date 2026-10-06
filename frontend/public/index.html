@@ -29,13 +29,15 @@
     root.dataset.structure = pick.structure;
   })();
 </script>
-<meta name="theme-color" content="#0A0E1F">
+<meta name="theme-color" content="#0e0f11">
 <title>Veyon Chat — Private Messaging</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/theme.css">
 <link rel="stylesheet" href="/css/features.css">
+<!-- The shadcn-style look (built from frontend/styles/ui.css with Tailwind). -->
+<link rel="stylesheet" href="/css/ui.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%232F6BFF'/><path d='M9 9l7 14 7-14' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <!-- PWA: lets "Install app" show up on both desktop and mobile browsers,
      and gives it a real icon + standalone window instead of opening as a
@@ -312,18 +314,6 @@
             </svg>
             Join a group with link
           </button>
-          <button type="button" data-action="announcements">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>
-            </svg>
-            Announcements <span class="menu-badge hidden" id="announce-badge"></span>
-          </button>
-          <button type="button" data-action="admin" class="hidden" id="menu-admin">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>
-            </svg>
-            Admin panel
-          </button>
           <div class="chat-menu-divider"></div>
           <button type="button" data-action="voice-commands">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -474,6 +464,10 @@
               <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
             </svg>
             Search in chat
+          </button>
+          <button type="button" data-action="archive">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/></svg>
+            <span>Archive chat</span>
           </button>
           <button type="button" data-action="notes">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -788,10 +782,10 @@
         <span class="rec-dot"></span>
         <span class="rec-time" id="rec-time">0:00</span>
         <span class="rec-hint" id="rec-hint">Recording voice note…</span>
-        <button class="send-btn" id="send-record-btn" aria-label="Send voice note">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+        <button class="send-btn" id="send-record-btn" title="Send voice note" aria-label="Send voice note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
                stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 6 9 17l-5-5"/>
+            <path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/>
           </svg>
         </button>
       </div>

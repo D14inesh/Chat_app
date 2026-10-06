@@ -12,3 +12,5 @@ backend/.env
 frontend/.env
 backend/venv/
 __pycache__/
+storage/catalog/*
+frontend/node_modules/
