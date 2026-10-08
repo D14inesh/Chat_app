@@ -49,6 +49,7 @@ die()  { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ── Options (command line > remembered > defaults) ───────────────────
 DOMAIN="" EMAIL="" IP="" WORKERS="" HTTPS_PORT="" HTTP_PORT="" APP_PORT="" WORKER_PORT=""
+# shellcheck source=/dev/null
 [ -f "$SAVED" ] && . "$SAVED"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -84,6 +85,21 @@ if [ -n "$DOMAIN" ]; then HOW="Let's Encrypt"; else HOW="self-signed"; fi
 echo "  address:      $ORIGIN   ($HOW)"
 if [ "$APP_PORT" = 0 ]; then echo "  phone app:    uses $ORIGIN"; else echo "  phone app:    https://$NAME:$APP_PORT (API only)"; fi
 echo "  workers:      $WORKERS on 127.0.0.1: $WORKER_PORTS"
+
+# Remembered right away, so re-running after a failure keeps these choices
+# (later runs and update.sh need no options).
+install -d -m 755 "$CONF_DIR"
+cat > "$SAVED" <<EOF
+# deploy/ubuntu/setup.sh options — re-used by later runs and update.sh
+DOMAIN="$DOMAIN"
+EMAIL="$EMAIL"
+IP="$IP"
+WORKERS="$WORKERS"
+HTTPS_PORT="$HTTPS_PORT"
+HTTP_PORT="$HTTP_PORT"
+APP_PORT="$APP_PORT"
+WORKER_PORT="$WORKER_PORT"
+EOF
 
 # ── Packages ─────────────────────────────────────────────────────────
 step "Packages"
@@ -192,7 +208,7 @@ ok "database '$PGDB' ready (schema applied)"
 step "Redis"
 # Live state only (who's online, ringing calls, ...): memory only, this
 # machine only. Our settings come last in the config, so they win.
-BEFORE=$(cat "$CONF_DIR/redis.conf" "$REDIS_CONF" 2>/dev/null | sha256sum)
+BEFORE=$( { cat "$CONF_DIR/redis.conf" "$REDIS_CONF" 2>/dev/null || true; } | sha256sum)   # first run: no file yet
 cat > "$CONF_DIR/redis.conf" <<EOF
 # Veyon Chat — included at the end of $REDIS_CONF by deploy/ubuntu/setup.sh
 bind 127.0.0.1 -::1
@@ -229,7 +245,9 @@ self_signed() {
     local have=""
     [ -f "$SELF_DIR/cert.pem" ] && have=$(openssl x509 -in "$SELF_DIR/cert.pem" -noout -ext subjectAltName 2>/dev/null || true)
     # Made once and kept: a new certificate means every browser warns again.
-    if [[ "$have" != *"$NAME"* ]]; then
+    # ("IP Address:1.2.3.4, DNS:localhost, ..." — match the whole name.)
+    have=", $(echo $have | sed 's/.*Alternative Name: *//'),"
+    if [[ "$have" != *":$NAME,"* ]]; then
         local san="DNS:localhost,IP:127.0.0.1"
         if [[ "$NAME" =~ ^[0-9.]+$ ]]; then san="IP:$NAME,$san"; else san="DNS:$NAME,$san"; fi
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$NAME" \
@@ -360,19 +378,6 @@ if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null)" == *"Status: acti
     step "Firewall (ufw)"
     for p in "$HTTP_PORT" "$HTTPS_PORT" $([ "$APP_PORT" != 0 ] && echo "$APP_PORT"); do ufw allow "$p/tcp" >/dev/null; echo "  $p open"; done
 fi
-
-# ── Remember options, check ──────────────────────────────────────────
-cat > "$SAVED" <<EOF
-# deploy/ubuntu/setup.sh options — re-used by later runs and update.sh
-DOMAIN="$DOMAIN"
-EMAIL="$EMAIL"
-IP="$IP"
-WORKERS="$WORKERS"
-HTTPS_PORT="$HTTPS_PORT"
-HTTP_PORT="$HTTP_PORT"
-APP_PORT="$APP_PORT"
-WORKER_PORT="$WORKER_PORT"
-EOF
 
 step "Check"
 H=$(curl -fsSk --max-time 5 --resolve "$NAME:$HTTPS_PORT:127.0.0.1" "https://$NAME:$HTTPS_PORT/api/health" || true)
