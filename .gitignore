@@ -14,3 +14,6 @@ backend/venv/
 __pycache__/
 storage/catalog/*
 frontend/node_modules/
+storage/chat_backups/*
+# Nginx, Redis and their generated config on the server (scripts/setup-server.ps1)
+runtime/

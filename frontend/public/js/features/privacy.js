@@ -1,61 +1,71 @@
-// Age (1-to-1 chats are 18+), the private-chats PIN, and Archive.
+// Age (only private 1-to-1 chats and calls are 18+), the private-chats PIN,
+// and Archive.
 
 import { app, icon } from './core.js';
 
-const maxBirth = () => {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() - 13);
-  return d.toISOString().slice(0, 10);
-};
+const today = () => new Date().toISOString().slice(0, 10);
+const UNDER_18 = 'Private chats are for people 18 and over. Groups and everything else work for you.';
 
-/** Sign-up form field. */
+/** Sign-up form field — optional; only private chats need it. */
 export function birthFieldHtml() {
   return `
     <div class="field">
-      <label for="f-birth">Date of birth</label>
-      <input id="f-birth" type="date" max="${maxBirth()}" min="1900-01-01" required>
-      <div class="field-hint">1-to-1 chats are for people 18 and over. Under 18? You can still use groups.</div>
+      <label for="f-birth">Date of birth <span style="opacity:.55;font-weight:500">optional</span></label>
+      <input id="f-birth" type="date" max="${today()}" min="1900-01-01">
+      <div class="field-hint">Only needed for private (1-to-1) chats, which are 18+. You can add it later.</div>
     </div>`;
 }
 
-/** Accounts made before the age rule: add a date of birth once (blocking). */
-export function ensureBirthDate(user) {
-  if (!user || user.birthDate || user.contactVerified === false || document.querySelector('.birth-card')) return;
-  const box = document.createElement('div');
-  box.className = 'modal-backdrop';
-  box.innerHTML = `
-    <div class="modal-card feature-card birth-card">
-      <div class="feature-hero">
-        <div class="feature-hero-icon">${icon('shield')}</div>
-        <h3>Your date of birth</h3>
-        <p>1-to-1 chats and calls are now for people 18 and over. Add your date of birth to keep using them — under 18s can still use groups.</p>
-      </div>
-      <div class="auth-error hidden" id="birth-error"></div>
-      <div class="field"><label>Date of birth</label><input id="birth-input" type="date" max="${maxBirth()}" min="1900-01-01"></div>
-      <p class="join-note">You can set this once, so please check it's correct.</p>
-      <div class="modal-actions">
-        <button type="button" class="btn-secondary" id="birth-signout">Sign out</button>
-        <button type="button" class="btn-primary" id="birth-save">Save</button>
-      </div>
-    </div>`;
-  document.body.appendChild(box);
-  const err = box.querySelector('#birth-error');
-  box.querySelector('#birth-signout').addEventListener('click', () => app.signOut());
-  box.querySelector('#birth-save').addEventListener('click', async () => {
-    const value = box.querySelector('#birth-input').value;
-    if (!value) { err.textContent = 'Pick your date of birth.'; err.classList.remove('hidden'); return; }
-    if (!confirm(`Save ${new Date(`${value}T00:00`).toLocaleDateString()} as your date of birth? It can't be changed later.`)) return;
-    try {
-      const res = await app.api('/api/auth/birth-date', { method: 'POST', body: JSON.stringify({ birthDate: value }) });
-      Object.assign(app.state.me, res);
-      box.remove();
-      await app.loadConversations();
-      app.toast(res.isAdult ? 'Saved — thank you!' : 'Saved. 1-to-1 chats open when you turn 18; groups work now.');
-    } catch (e) {
-      err.textContent = e.message;
-      err.classList.remove('hidden');
-    }
+/** Asks for a date of birth (once — it can't be changed). Resolves true
+ *  when saved, false when the person chose "Not now". */
+function askBirthDate() {
+  return new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'modal-backdrop';
+    box.innerHTML = `
+      <div class="modal-card feature-card birth-card">
+        <div class="feature-hero">
+          <div class="feature-hero-icon">${icon('shield')}</div>
+          <h3>Private chats are 18+</h3>
+          <p>Add your date of birth once to use private chats and calls. Groups, status and everything else don't need it.</p>
+        </div>
+        <div class="auth-error hidden" id="birth-error"></div>
+        <div class="field"><label>Date of birth</label><input id="birth-input" type="date" max="${today()}" min="1900-01-01"></div>
+        <p class="join-note">You can set this once, so please check it's correct.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" id="birth-later">Not now</button>
+          <button type="button" class="btn-primary" id="birth-save">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(box);
+    const done = (saved) => { box.remove(); resolve(saved); };
+    const err = box.querySelector('#birth-error');
+    box.querySelector('#birth-later').addEventListener('click', () => done(false));
+    box.addEventListener('click', (e) => { if (e.target === box) done(false); });
+    box.querySelector('#birth-save').addEventListener('click', async () => {
+      const value = box.querySelector('#birth-input').value;
+      if (!value) { err.textContent = 'Pick your date of birth.'; err.classList.remove('hidden'); return; }
+      if (!confirm(`Save ${new Date(`${value}T00:00`).toLocaleDateString()} as your date of birth? It can't be changed later.`)) return;
+      try {
+        const res = await app.api('/api/auth/birth-date', { method: 'POST', body: JSON.stringify({ birthDate: value }) });
+        Object.assign(app.state.me, res);
+        done(true);
+      } catch (e) {
+        err.textContent = e.message;
+        err.classList.remove('hidden');
+      }
+    });
   });
+}
+
+/** The door to private chats: asks for a date of birth the first time,
+ *  then lets 18+ through. Resolves true when the private chat may open. */
+export async function privateChatGate() {
+  const me = app.state.me;
+  if (!me) return false;
+  if (!me.birthDate && !(await askBirthDate())) return false;
+  if (!me.isAdult) { app.toast(UNDER_18, true); return false; }
+  return true;
 }
 
 // ── Private-chats PIN (every 1-to-1 chat behind the chat-lock PIN) ──

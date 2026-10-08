@@ -168,6 +168,8 @@ async def poll_link(request: Request, response: Response):
         await query("DELETE FROM link_requests WHERE code = $1", code)
         raise HTTPException(403, device_taken_message(owner))
     await bind_device(dev, user["id"], device_label(request))
+    from app.utils.login_approval import trust
+    await trust(user["id"], dev, device_label(request))   # linked from a signed-in phone
 
     # Single use — burn it now that we're handing over the goods.
     await query("UPDATE link_requests SET status = 'used' WHERE code = $1", code)

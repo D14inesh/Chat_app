@@ -1,12 +1,13 @@
 import {
   generateIdentity, exportPublicKey, wrapPrivateKey, unwrapPrivateKey,
   deriveSharedKey, clearKeyCache, encryptText, decryptText,
-  encryptFile, decryptFileMeta, decryptFileBytes, safetyNumber, b64ToBuf, bufToB64,
+  encryptFile, decryptFileMeta, decryptFileBytes, sealFileForSignal, safetyNumber, b64ToBuf, bufToB64,
   generateContentKey, deriveWrapKey, wrapContentKey, unwrapContentKey,
   saveSessionKey, loadSessionKey, clearSessionKey,
   generateLinkEphemeral, sealIdentityForLink, openIdentityFromLink,
 } from './crypto.js';
-import { localStore } from './localstore.js';
+import { localStore, isCleared, markCleared } from './localstore.js';
+import * as Sig from './signal.js';
 import * as F from './features/index.js';
 
 // ═══════════════════════════════════════════════════════════
@@ -16,6 +17,8 @@ import * as F from './features/index.js';
 const API_BASE = (() => {
   const cfg = window.APP_CONFIG || {};
   if (cfg.apiBase) return cfg.apiBase.replace(/\/+$/, '');
+  // Behind Nginx the website and the API share one address (/api, /ws).
+  if (cfg.sameOrigin) return location.origin;
   // Default: backend on the same host as this page, on its own port — so
   // localhost and LAN IPs both work without editing anything.
   const https = location.protocol === 'https:';
@@ -32,6 +35,8 @@ function apiUrl(path) {
 // ═══════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════
+
+const pendingEdits = new Map();   // messageId -> text I just edited it to (Signal)
 
 const state = {
   me: null,
@@ -148,6 +153,12 @@ const JSON_KINDS = new Set(['file', 'voice', 'location', 'contact', 'poll', 'pro
 async function decryptBody(key, m) {
   // A business's automatic reply is plain text written by the server.
   if (m.kind === 'auto') return m.ciphertext;
+  // Signal (1-to-1): this device's own sealed copy, opened once and kept.
+  if (m.ciphertext === 'signal') {
+    const text = await Sig.open(m);
+    if (text == null) throw new Error('Not on this device');
+    return JSON_KINDS.has(m.kind) ? JSON.parse(text) : text;
+  }
   return JSON_KINDS.has(m.kind)
     ? decryptFileMeta(key, m.ciphertext, m.iv)
     : decryptText(key, m.ciphertext, m.iv);
@@ -297,8 +308,7 @@ $('auth-form').addEventListener('submit', async (e) => {
 
   try {
     if (authMode === 'register') {
-      const birthDate = $('f-birth').value;
-      if (!birthDate) throw new Error('Enter your date of birth.');
+      const birthDate = $('f-birth').value || undefined;   // optional: only private chats need it
       const contact = readSignupContact();
       if (!contact.otp) throw new Error('Tap “Send code”, then enter the 6-digit code from your Gmail.');
       btn.textContent = 'Generating keys…';
@@ -321,10 +331,16 @@ $('auth-form').addEventListener('submit', async (e) => {
       await enterApp(user);
     } else {
       btn.textContent = 'Signing in…';
-      const { user, encPrivateKey } = await api('/api/auth/login', {
+      let result = await api('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
+      if (result.pending) {
+        // New browser for this account: wait for the owner to accept it.
+        btn.textContent = 'Waiting for approval…';
+        result = await F.waitForApproval(result);
+      }
+      const { user, encPrivateKey } = result;
 
       btn.textContent = 'Unlocking keys…';
       state.privateKey = await unwrapPrivateKey(encPrivateKey, password);
@@ -343,6 +359,8 @@ $('auth-form').addEventListener('submit', async (e) => {
 /** This session was ended from another device ("Log out all other
  *  devices"): wipe this device's copy, back to the login screen. */
 async function signedOutRemotely() {
+  if (state.me) await Sig.wipeSignal(state.me.id);
+  if (state.me) F.forgetBackupHere(state.me.id);
   clearKeyCache();
   await clearSessionKey();
   await localStore.clear();
@@ -363,6 +381,8 @@ $('logout-btn').addEventListener('click', () => signOut());
 async function signOut(releaseDevice = false) {
   const path = releaseDevice ? '/api/auth/device/release' : '/api/auth/logout';
   try { await api(path, { method: 'POST' }); } catch { /* leaving anyway */ }
+  if (state.me) await Sig.wipeSignal(state.me.id);
+  if (state.me) F.forgetBackupHere(state.me.id);
   state.ws?.close(1000, 'signed out');
   clearKeyCache();
   await clearSessionKey();
@@ -477,7 +497,7 @@ async function openLinkedDevicesPanel() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>Linked devices</h3>
       <div class="linked-this-device">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -626,7 +646,7 @@ function openEditProfile() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>Edit profile</h3>
       <div class="edit-profile-row">
         <div class="avatar lg" id="edit-profile-preview" style="background:${escapeAttr(state.me.avatarColor)}">
@@ -655,42 +675,6 @@ function openEditProfile() {
 
       ${F.businessSectionHtml()}
 
-      <div class="field" style="margin-top:20px">
-        <label>Appearance</label>
-        <div class="appearance-note" style="margin:-2px 0 10px">Applies on every device you sign in from.</div>
-
-        <div class="appearance-group" style="margin-top:0">
-          <span class="appearance-label">Palette</span>
-          <div class="palette-options" id="ap-palettes">
-            ${PALETTE_META.map((p) => `
-              <button type="button" class="palette-option" role="radio" data-palette="${p.key}">
-                <span class="po-sw">${p.sw.map((c) => `<i style="background:${escapeAttr(c)}"></i>`).join('')}</span>
-                <span class="po-text">
-                  <span class="po-name">${escapeHtml(p.name)}</span>
-                  <span class="po-desc">${escapeHtml(p.desc)}</span>
-                </span>
-              </button>`).join('')}
-          </div>
-        </div>
-
-        <div class="appearance-group">
-          <span class="appearance-label">Mode</span>
-          <div class="appearance-seg" id="ap-mode">
-            <button type="button" data-mode="dark">🌙 Dark</button>
-            <button type="button" data-mode="light">☀️ Light</button>
-          </div>
-          <div class="appearance-note" id="ap-mode-note"></div>
-        </div>
-
-        <div class="appearance-group">
-          <span class="appearance-label">Layout</span>
-          <div class="appearance-seg" id="ap-structure">
-            <button type="button" data-structure="floating">Floating</button>
-            <button type="button" data-structure="boxed">Boxed</button>
-          </div>
-          <div class="appearance-note">Floating rounds each panel and leaves a gap; Boxed is edge-to-edge.</div>
-        </div>
-      </div>
       <div class="modal-actions">
         <button type="button" class="btn-primary" id="edit-profile-close">Done</button>
       </div>
@@ -729,7 +713,6 @@ function openEditProfile() {
     }
   });
 
-  wireAppearanceControls(box);
   F.wireBusinessSection(box);
 
   box.querySelector('#edit-profile-photo-input').addEventListener('change', async (e) => {
@@ -758,12 +741,65 @@ function openEditProfile() {
   });
 }
 
+/** Settings → Chats: palette, light / dark, layout (its own page now,
+ *  instead of filling the whole profile screen). */
+function openAppearance() {
+  const box = document.createElement('div');
+  box.className = 'modal-backdrop';
+  box.innerHTML = `
+    <div class="modal-card" data-panel data-panel-title="Chats">
+      <h3>Chats</h3>
+      <div class="field">
+        <label>Theme</label>
+        <div class="appearance-note" style="margin:-2px 0 10px">Applies on every device you sign in from.</div>
+
+        <div class="appearance-group" style="margin-top:0">
+          <span class="appearance-label">Palette</span>
+          <div class="palette-options" id="ap-palettes">
+            ${PALETTE_META.map((p) => `
+              <button type="button" class="palette-option" role="radio" data-palette="${p.key}">
+                <span class="po-sw">${p.sw.map((c) => `<i style="background:${escapeAttr(c)}"></i>`).join('')}</span>
+                <span class="po-text">
+                  <span class="po-name">${escapeHtml(p.name)}</span>
+                  <span class="po-desc">${escapeHtml(p.desc)}</span>
+                </span>
+              </button>`).join('')}
+          </div>
+        </div>
+
+        <div class="appearance-group">
+          <span class="appearance-label">Mode</span>
+          <div class="appearance-seg" id="ap-mode">
+            <button type="button" data-mode="dark">🌙 Dark</button>
+            <button type="button" data-mode="light">☀️ Light</button>
+          </div>
+          <div class="appearance-note" id="ap-mode-note"></div>
+        </div>
+
+        <div class="appearance-group">
+          <span class="appearance-label">Layout</span>
+          <div class="appearance-seg" id="ap-structure">
+            <button type="button" data-structure="floating">Floating</button>
+            <button type="button" data-structure="boxed">Boxed</button>
+          </div>
+          <div class="appearance-note">Floating rounds each panel and leaves a gap; Boxed is edge-to-edge.</div>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+  box.addEventListener('click', (e) => { if (e.target === box) box.remove(); });
+  wireAppearanceControls(box);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Boot
 // ═══════════════════════════════════════════════════════════
 
 async function enterApp(user) {
   state.me = user;
+  // This browser's Signal keys: started first, because opening Signal
+  // messages (even the chat-list previews below) waits for its storage.
+  Sig.initSignal(api, user);
   writeOffline(OFFLINE_ME_KEY, { user, publicJwk: state.publicJwk });
   applyAppearance(user.appearance); // server value wins over the localStorage cache
 
@@ -787,10 +823,16 @@ async function enterApp(user) {
   F.startExpiryWatcher();  // hides disappearing messages the moment they expire
   connectSocket();         // its 'open' handler flushes the outbox
   F.ensureContact(user);   // older accounts: add a mobile number + Gmail once
-  F.ensureBirthDate(user); // …and a date of birth (1-to-1 chats are 18+)
   F.nudgeRecoveryKey(user);
+  F.startBackupWatcher(); // automatic backup, or offer a restore on a new device
   F.checkInviteHash();     // opened from a group invite link
   F.refreshMissedCalls();
+  // Notifications when this tab is closed (Web Push), if allowed.
+  if ('Notification' in window && Notification.permission === 'granted'
+      && (user.notifyMessages !== false || user.notifyCalls !== false)) {
+    ensurePushSubscription();
+  }
+  openChatFromLink();   // opened from a notification while no tab was open
 
   // "Hey ARM" is on unless this person turned it off (⋮ → Voice commands).
   // If mic access is refused, startVoiceCommandListener() just says so.
@@ -912,6 +954,7 @@ async function loadConversations() {
     } catch {
       state.plaintext.set(c.lastMessage.id, null); // renders as "can't decrypt"
     }
+    if (isCleared(c.lastMessage, state.plaintext.get(c.lastMessage.id))) c.lastMessage = null;
   }));
 
   renderChatList();
@@ -953,6 +996,7 @@ async function keyFor(conversation) {
 async function openConversation(id) {
   const convo = state.conversations.get(id);
   if (!convo) return;
+  if (convo.kind === 'direct' && !(await F.privateChatGate())) return;   // private chats are 18+
   if (!(await F.canOpenChat(convo))) return;   // locked chat: PIN first
 
   state.activeId = id;
@@ -1018,7 +1062,9 @@ async function openConversation(id) {
         for (const c of cached) {
           if ('_body' in c) state.plaintext.set(c.id, c._body);
         }
-        state.messages.set(id, cached.map(({ _body, ...m }) => m));
+        state.messages.set(id, cached
+          .filter((c) => !isCleared(c, c._body))
+          .map(({ _body, ...m }) => m));
         renderMessages();
         paintedFromCache = true;
       }
@@ -1034,8 +1080,9 @@ async function openConversation(id) {
       state.groupMembers.set(id, members);
     }
 
-    const { messages } = await api(`/api/conversations/${id}/messages`);
-    const key = await keyFor(convo);
+    let { messages } = await api(`/api/conversations/${id}/messages`);
+    // Signal messages don't need the chat's older key — don't let it block them.
+    const key = await keyFor(convo).catch(() => null);
 
     for (const m of messages) {
       if (state.plaintext.has(m.id) && !m.editedAt) continue;
@@ -1046,6 +1093,8 @@ async function openConversation(id) {
       }
     }
     await decryptReactionsFor(key, messages);
+    // Anything the person cleared in Storage & data stays gone from this device.
+    messages = messages.filter((m) => !isCleared(m, state.plaintext.get(m.id)));
 
     // Keep any still-unsent (offline) messages visible after the server list
     // replaces the in-memory one.
@@ -1147,6 +1196,7 @@ async function decryptReactionsFor(key, messages) {
 }
 
 async function startChatWith(userId) {
+  if (!(await F.privateChatGate())) return;   // private chats are 18+
   try {
     const { conversation } = await api('/api/conversations/direct', {
       method: 'POST',
@@ -1607,9 +1657,13 @@ function bubbleBody(m) {
   const plain = state.plaintext.get(m.id);
 
   if (plain === null || plain === undefined) {
-    return `<div class="text" style="opacity:.6;font-style:italic">
-              Can't decrypt this message
-            </div>`;
+    // Signal messages are sealed per device: one sent before this phone or
+    // browser was set up has no copy here (an encrypted backup brings them back).
+    const why = m.ciphertext === 'signal'
+      ? (m.senderId === state.me?.id ? '🔒 Sent from your other device before this one was set up'
+                                      : '🔒 Sent before this device was set up')
+      : "Can't decrypt this message";
+    return `<div class="text" style="opacity:.6;font-style:italic">${why}</div>`;
   }
 
   if (m.kind === 'poll') return F.pollBody(m, plain);
@@ -1739,36 +1793,99 @@ function wireInlineMedia() {
  */
 function wireAttachments() {
   document.querySelectorAll('.attach').forEach((el) => {
+    const meta = state.plaintext.get(el.dataset.msg);
+    const mime = meta?.mime || '';
+    const kind = mime.startsWith('image/') ? 'photos' : mime.startsWith('video/') ? 'videos' : null;
+
     el.addEventListener('click', async () => {
       const msgId = el.dataset.msg;
       const meta = state.plaintext.get(msgId);
       if (!meta) return;
+      const shown = el.querySelector('img.preview-img');
+      if (shown) { showLightbox(shown.src); return; }
+      if (el.querySelector('video')) return;
 
       const info = el.querySelector('.attach-size');
-      const restore = info.textContent;
-      info.textContent = 'Decrypting…';
+      const restore = info?.textContent;
+      if (info) info.textContent = 'Decrypting…';
 
       try {
         const key = state.keys.get(state.activeId);
         const blob = await getDecryptedMediaBlob(el.dataset.file, key, meta.blobIv, meta.mime);
-        const url = URL.createObjectURL(blob);
-
-        if ((meta.mime || '').startsWith('image/')) {
-          showLightbox(url);
-        } else {
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = meta.name;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        if (kind) {
+          showMediaInline(el, blob, kind);
+          return;
         }
-        info.textContent = restore;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = meta.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        if (info) info.textContent = restore;
       } catch (err) {
-        info.textContent = restore;
+        if (info) info.textContent = restore;
         toast(err.message, true);
       }
     });
+
+    // Storage & data → Automatic download: what's already on this device
+    // shows straight away; the rest downloads only if that setting allows.
+    if (kind && meta && !el.dataset.auto) {
+      el.dataset.auto = '1';
+      autoShowMedia(el, meta, kind);
+    }
   });
+}
+
+/** Photo/video bubble: show it inline when it's on this device already, or
+ *  when automatic download is on for that kind. */
+async function autoShowMedia(el, meta, kind) {
+  try {
+    const cached = await localStore.getMedia(el.dataset.file);
+    if (!cached?.blob && !autoDownloadOn(kind)) {
+      const info = el.querySelector('.attach-size');
+      if (info && !info.dataset.tap) {
+        info.dataset.tap = '1';
+        info.textContent = info.textContent.replace('tap to open', 'tap to download');
+      }
+      return;
+    }
+    const key = state.keys.get(state.activeId);
+    const blob = cached?.blob || await getDecryptedMediaBlob(el.dataset.file, key, meta.blobIv, meta.mime);
+    if (el.isConnected) showMediaInline(el, blob, kind);
+  } catch { /* stays as a "tap" row */ }
+}
+
+function showMediaInline(el, blob, kind) {
+  const url = URL.createObjectURL(blob);
+  el.classList.add('attach-media');
+  if (kind === 'photos') {
+    const img = document.createElement('img');
+    img.className = 'preview-img';
+    img.alt = 'Photo';
+    img.src = url;
+    el.replaceChildren(img);
+  } else {
+    const video = document.createElement('video');
+    video.className = 'attach-video';
+    video.controls = true;
+    video.preload = 'metadata';
+    video.src = url;
+    el.replaceChildren(video);
+  }
+}
+
+/** Storage & data → Automatic download, per kind: true = automatic,
+ *  false = tap to download. Photos and voice notes default to automatic,
+ *  videos to tap (they're big). */
+const AUTO_DOWNLOAD_DEFAULTS = { photos: true, voice: true, videos: false };
+function autoDownloadOn(kind) {
+  const all = F.prefs.get('autoDownload') || {};
+  return kind in all ? !!all[kind] : AUTO_DOWNLOAD_DEFAULTS[kind];
+}
+function setAutoDownload(kind, on) {
+  F.prefs.set('autoDownload', { ...(F.prefs.get('autoDownload') || {}), [kind]: on });
 }
 
 function tickIcon(m, small = false) {
@@ -1924,8 +2041,28 @@ function wireVoicePlayers() {
         btn.disabled = false;
       }
     });
+
+    if (!el.dataset.auto) {
+      el.dataset.auto = '1';
+      prefetchVoice(el, canvas);
+    }
   });
   F.repaintVoice();
+}
+
+/** Storage & data → Automatic download for voice notes: fetch ahead so
+ *  play is instant (and the waveform shows). Ones already on this device
+ *  always get their waveform. */
+async function prefetchVoice(el, canvas) {
+  try {
+    const cached = await localStore.getMedia(el.dataset.file);
+    if (!cached?.blob && !autoDownloadOn('voice')) return;
+    const meta = state.plaintext.get(el.dataset.msg);
+    if (!meta) return;
+    const blob = cached?.blob
+      || await getDecryptedMediaBlob(el.dataset.file, state.keys.get(state.activeId), meta.blobIv, meta.mime);
+    if (el.isConnected) await drawWaveform(canvas, new Uint8Array(await blob.arrayBuffer()));
+  } catch { /* plays (and downloads) on tap instead */ }
 }
 
 /**
@@ -2164,7 +2301,7 @@ async function openStarredMessagesPanel() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>⭐ Starred messages</h3>
       <div class="reminder-list" id="starred-list" style="margin-top:0; padding-top:0; border-top:none;"></div>
       <div class="modal-actions">
@@ -2305,6 +2442,12 @@ async function submitEdit() {
   cancelEdit();
 
   try {
+    const original = state.messages.get(conversationId)?.find((m) => m.id === messageId);
+    if (original?.ciphertext === 'signal' && Sig.signalReady()) {
+      pendingEdits.set(messageId, text);
+      await sendSealed({ type: 'edit-message', conversationId, messageId }, text);
+      return;
+    }
     const key = await keyFor(convo);
     const { ciphertext, iv } = await encryptText(key, text);
     sendSocket({ type: 'edit-message', conversationId, messageId, ciphertext, iv });
@@ -2917,6 +3060,11 @@ async function sendMessage(explicitText) {
   renderMessages();
 
   try {
+    if (await Sig.useSignalFor(convo)) {
+      // Signal protocol: sealed separately for every device.
+      await sendSealed({ type: 'send', conversationId, kind: 'text', tempId, replyToId, mentionAll }, body);
+      return;
+    }
     const key = await keyFor(convo);
     const { ciphertext, iv } = await encryptText(key, body);
     sendSocket({ type: 'send', conversationId, ciphertext, iv, kind: 'text', tempId, replyToId, mentionAll });
@@ -2925,6 +3073,59 @@ async function sendMessage(explicitText) {
     renderMessages();
     toast(err.message, true);
   }
+}
+
+// ── Signal sends ─────────────────────────────────────────────
+// A Signal frame is sealed right before it goes out (so it's always sealed
+// for the current devices), and kept unsealed here until the server confirms
+// it — if the server says the devices changed, it's sealed again and resent.
+const sealedOut = new Map();   // tempId or "edit:<messageId>" -> { frame, text, tries }
+
+function membersOf(conversationId) {
+  const c = state.conversations.get(conversationId);
+  return c?.kind === 'direct' ? [c.peer.id, state.me.id] : [];
+}
+
+async function sendSealed(frame, text) {
+  const key = frame.tempId || `edit:${frame.messageId}`;
+  sealedOut.set(key, { frame, text, tries: (sealedOut.get(key)?.tries || 0) });
+  if (state.ws?.readyState !== WebSocket.OPEN) {
+    if (frame.tempId) {
+      queueOutbound({ ...frame, signalText: text });   // sealed when back online
+      toast('No connection — this will send when you’re back online.');
+    }
+    return;
+  }
+  const envelopes = await Sig.seal(membersOf(frame.conversationId), text);
+  state.ws.send(JSON.stringify({ ...frame, ciphertext: 'signal', iv: 'signal', envelopes }));
+}
+
+/** A Signal photo / voice note: upload the locked file, then send the
+ *  sealed message that holds its key. Offline: both wait in the outbox. */
+async function sendSealedFile(frame, blob, meta) {
+  const text = JSON.stringify(meta);
+  if (state.ws?.readyState !== WebSocket.OPEN || !navigator.onLine) {
+    queueOutbound({ ...frame, signalText: text }, { blob });
+    toast('No connection — this will send when you’re back online.');
+    return;
+  }
+  const form = new FormData();
+  form.append('blob', blob, 'blob');
+  const { filePath, fileSize } = await api('/api/upload', { method: 'POST', body: form });
+  await sendSealed({ ...frame, filePath, fileSize }, text);
+}
+
+async function onSignalMismatch(f) {
+  await Sig.applyDeviceList(f.devices);
+  const key = f.tempId || `edit:${f.editOf}`;
+  const pending = sealedOut.get(key);
+  if (!pending) return;
+  if (++pending.tries > 3) {
+    sealedOut.delete(key);
+    toast('Couldn’t send — their devices keep changing. Try again in a moment.', true);
+    return;
+  }
+  await sendSealed(pending.frame, pending.text);
 }
 
 // ── Attachment menu ─────────────────────────────────────────
@@ -2975,6 +3176,14 @@ async function sendMediaFile(file, extra = {}) {
   const offline = () => !navigator.onLine || state.ws?.readyState !== WebSocket.OPEN;
 
   try {
+    if (await Sig.useSignalFor(convo)) {
+      // Signal: the file gets its own key, sealed inside the message.
+      const { blob, meta } = await sealFileForSignal(file, extra);
+      state.plaintext.set(tempId, meta);
+      await sendSealedFile({ type: 'send', conversationId, kind: 'file', tempId,
+                             ...(extra.viewOnce ? { viewOnce: true } : {}) }, blob, meta);
+      return;
+    }
     const key = await keyFor(convo);
     const { blob, ciphertext, iv } = await encryptFile(key, file, extra);
     const baseFrame = { type: 'send', conversationId, ciphertext, iv, kind: 'file', tempId,
@@ -3340,6 +3549,12 @@ async function sendVoiceNote(blob) {
   renderMessages();
 
   try {
+    if (await Sig.useSignalFor(convo)) {
+      const { blob: sealed, meta } = await sealFileForSignal(fileLike);
+      state.plaintext.set(tempId, meta);
+      await sendSealedFile({ type: 'send', conversationId, kind: 'voice', tempId }, sealed, meta);
+      return;
+    }
     const key = await keyFor(convo);
     const { blob: encBlob, ciphertext, iv } = await encryptFile(key, fileLike);
 
@@ -3379,6 +3594,10 @@ async function sendJsonMessage(kind, payload, extras = {}) {
   renderMessages();
 
   try {
+    if (await Sig.useSignalFor(convo)) {
+      await sendSealed({ type: 'send', conversationId, kind, tempId, ...extras }, JSON.stringify(payload));
+      return;
+    }
     const key = await keyFor(convo);
     const { ciphertext, iv } = await encryptText(key, JSON.stringify(payload));
     sendSocket({ type: 'send', conversationId, ciphertext, iv, kind, tempId, ...extras });
@@ -3654,6 +3873,13 @@ async function flushOutbox() {
           const { filePath, fileSize } = await api('/api/upload', { method: 'POST', body: form });
           frame = { ...e.frame, filePath, fileSize };
         }
+        if (frame.signalText != null) {
+          const { signalText, ...rest } = frame;
+          await sendSealed(rest, signalText);
+          e.sentAt = Date.now();
+          localStore.putOutbox(e.tempId, e);
+          continue;
+        }
         state.ws.send(JSON.stringify(frame));
         e.sentAt = Date.now();
         localStore.putOutbox(e.tempId, e);
@@ -3676,6 +3902,7 @@ async function handleFrame(frame) {
     case 'sent': {
       // Swap the optimistic bubble for the authoritative one.
       clearOutbound(frame.tempId);   // confirmed — drop it from the offline queue
+      sealedOut.delete(frame.tempId);
       const list = state.messages.get(frame.conversationId);
       if (list) {
         const i = list.findIndex((m) => m.id === frame.tempId);
@@ -3699,6 +3926,10 @@ async function handleFrame(frame) {
             state.plaintext.set(frame.message.id, state.plaintext.get(frame.tempId));
           }
           state.plaintext.delete(frame.tempId);
+          if (frame.message.ciphertext === 'signal') {
+            const mine = state.plaintext.get(frame.message.id);
+            Sig.keep(frame.message.id, typeof mine === 'string' ? mine : JSON.stringify(mine));
+          }
           list[i] = frame.message;
           // Same bubble, real id now — it already popped in as the pending one.
           if (renderedFor.ids.has(frame.tempId)) renderedFor.ids.add(frame.message.id);
@@ -3713,6 +3944,12 @@ async function handleFrame(frame) {
 
     case 'message':
       await onIncoming(frame);
+      break;
+    case 'signal-mismatch':
+      await onSignalMismatch(frame);
+      break;
+    case 'signal-devices-changed':
+      Sig.forgetDevices(frame.userId);
       break;
 
     case 'receipts': {
@@ -3810,13 +4047,26 @@ async function handleFrame(frame) {
     case 'message-edited': {
       const list = state.messages.get(frame.conversationId);
       const m = list?.find((x) => x.id === frame.messageId);
+      if (frame.ciphertext === 'signal') sealedOut.delete(`edit:${frame.messageId}`);
       if (m) {
         m.ciphertext = frame.ciphertext;
         m.iv = frame.iv;
         m.editedAt = frame.editedAt;
         const key = state.keys.get(frame.conversationId);
         try {
-          state.plaintext.set(frame.messageId, key ? await decryptText(key, frame.ciphertext, frame.iv) : null);
+          if (frame.ciphertext === 'signal') {
+            // Mine (edited here): keep what I typed. Otherwise: open my copy.
+            const mine = pendingEdits.get(frame.messageId);
+            pendingEdits.delete(frame.messageId);
+            if (mine != null) {
+              await Sig.keep(frame.messageId, mine, frame.editedAt);
+              state.plaintext.set(frame.messageId, mine);
+            } else {
+              state.plaintext.set(frame.messageId, await Sig.open({ ...m, envelope: frame.envelope }));
+            }
+          } else {
+            state.plaintext.set(frame.messageId, key ? await decryptText(key, frame.ciphertext, frame.iv) : null);
+          }
         } catch {
           state.plaintext.set(frame.messageId, null);
         }
@@ -3891,7 +4141,7 @@ async function onIncoming(frame) {
   if (!convo) return;
 
   try {
-    const key = await keyFor(convo);
+    const key = message.ciphertext === 'signal' ? null : await keyFor(convo);   // Signal needs no chat key
     state.plaintext.set(message.id, await decryptBody(key, message));
   } catch {
     state.plaintext.set(message.id, null);
@@ -3909,6 +4159,8 @@ async function onIncoming(frame) {
     if (message.kind === 'text' && message.senderId !== state.me.id) F.maybePlayEffect(state.plaintext.get(message.id));
     sendSocket({ type: 'read', conversationId });   // we're looking at it
     if (!input.value.trim()) refreshComposerSuggestions();   // fresh quick replies
+    // Open, but the tab is in the background: still let them know.
+    if (document.hidden && message.senderId !== state.me.id && !convo.muted && !convo.archived) notify(convo, message);
   } else if (message.senderId !== state.me.id) {
     convo.unread = (convo.unread || 0) + 1;
     if ((!convo.muted && !convo.archived) || message.mentionAll) notify(convo, message);
@@ -4793,7 +5045,7 @@ function openGroupCreator() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>New group</h3>
       <div class="field"><label>Group name</label><input id="group-name-input" placeholder="Team Veyon"></div>
       <div class="field">
@@ -5510,8 +5762,15 @@ function showIncomingCallUI(convo, fromUserId, callType) {
   $('call-in-progress-controls').classList.add('hidden');
   F.startRinging(F.ringtoneFor(fromUserId));   // this contact's ringtone (or the default)
 
-  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-    new Notification(`Incoming call from ${name}`);
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden
+      && state.me?.notifyCalls !== false) {
+    const n = new Notification(`📞 Incoming ${callType === 'video' ? 'video' : 'voice'} call`, {
+      body: `${name} is calling you`,
+      tag: 'incoming-call',
+      requireInteraction: true,
+      icon: '/icons/icon-192.png',
+    });
+    n.onclick = () => { window.focus(); n.close(); };
   }
 }
 
@@ -5954,7 +6213,7 @@ function openQrModal() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>QR code</h3>
       <div class="qr-tabs">
         <button type="button" class="qr-tab active" data-tab="mine">My code</button>
@@ -6114,7 +6373,7 @@ function openGames() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card ai-chat-card">
+    <div class="modal-card ai-chat-card" data-panel="main">
       <div class="ai-chat-head">
         <div class="ai-chat-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -6901,17 +7160,42 @@ $('back-btn').addEventListener('click', () => {
   renderChatList();
 });
 
-$('safety-btn').addEventListener('click', async () => {
+$('safety-btn').addEventListener('click', () => {
   const convo = state.conversations.get(state.activeId);
-  if (!convo || !state.publicJwk) return;
-
-  const number = await safetyNumber(state.publicJwk, convo.peer.publicKey);
-  alert(
-    `Safety number with ${convo.peer.displayName}:\n\n${number}\n\n` +
-    'Compare this with them over a channel you already trust (in person, a phone ' +
-    'call). If it matches on both sides, nobody is intercepting this conversation.'
-  );
+  if (convo?.kind === 'direct') openEncryptionInfo(convo);
 });
+
+/** Contact info → Encryption: what protects this chat, and the safety
+ *  number both people can compare to be sure nobody is in the middle. */
+async function openEncryptionInfo(convo) {
+  if (!state.publicJwk || !convo?.peer) return;
+  const number = await safetyNumber(state.publicJwk, convo.peer.publicKey);
+  const groups = String(number).replace(/\s+/g, '').match(/.{1,5}/g) || [];
+  const signal = await Sig.useSignalFor(convo);
+  const box = document.createElement('div');
+  box.className = 'modal-backdrop';
+  box.innerHTML = `
+    <div class="modal-card encryption-card" data-panel="right" data-panel-title="Encryption">
+      <div class="encryption-hero">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <p class="encryption-lead">Messages and calls with <b>${escapeHtml(convo.peer.displayName)}</b> are end-to-end encrypted.
+        No one outside this chat — not even Veyon — can read or listen to them.</p>
+      <div class="encryption-proto">${signal
+        ? '🔐 <b>Signal protocol</b> — every message gets its own new key, so even a stolen phone can’t unlock past messages.'
+        : '🔐 Encrypted with keys only the two of you have.'}</div>
+      <div class="encryption-label">Safety number</div>
+      <div class="safety-grid">${groups.map((g) => `<span>${escapeHtml(g)}</span>`).join('')}</div>
+      <p class="encryption-note">To verify, compare this number with ${escapeHtml(convo.peer.displayName)} — in person or on a call.
+        If it’s the same on both phones, nobody is listening in.</p>
+      <button type="button" class="btn-secondary" id="copy-safety">Copy number</button>
+    </div>`;
+  document.body.appendChild(box);
+  box.addEventListener('click', (e) => { if (e.target === box) box.remove(); });
+  box.querySelector('#copy-safety').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(groups.join(' ')); toast('Safety number copied.'); } catch { toast('Couldn’t copy.', true); }
+  });
+}
 
 // ═══════════════════════════════════════════════════════════
 // Chat-head overflow menu — search in chat, wallpaper
@@ -6962,13 +7246,24 @@ $('sidebar-menu').addEventListener('click', (e) => {
   const action = e.target.closest('button')?.dataset.action;
   if (!action) return;
   $('sidebar-menu').classList.add('hidden');
-  if (action === 'starred') openStarredMessagesPanel();
+  sidebarAction(action);
+});
+
+/** What the ⋮ menu items and the Settings page rows open. */
+function sidebarAction(action) {
+  if (action === 'settings') F.openSettings();
+  else if (action === 'profile') openEditProfile();
+  else if (action === 'appearance') openAppearance();
+  else if (action === 'recovery-key') F.openRecoveryKeySetup();
+  else if (action === 'chat-lock') F.openChatLockSettings();
+  else if (action === 'starred') openStarredMessagesPanel();
   else if (action === 'select-chats') enterChatSelectMode();
   else if (action === 'mark-all-read') markAllRead();
   else if (action === 'app-lock') openAppLockSettings();
   else if (action === 'blocked-users') openBlockedUsersPanel();
   else if (action === 'linked-devices') openLinkedDevicesPanel();
   else if (action === 'storage') openStoragePanel();
+  else if (action === 'chat-backup') F.openBackupPanel();
   else if (action === 'voice-commands') toggleVoiceCommands();
   else if (action === 'broadcasts') F.openBroadcastsPanel();
   else if (action === 'quick-replies') F.openQuickRepliesPanel();
@@ -6976,7 +7271,8 @@ $('sidebar-menu').addEventListener('click', (e) => {
   else if (action === 'chat-features') F.openFeatureSettings();
   else if (action === 'communities') F.openCommunities();
   else if (action === 'join-link') F.openJoinWithLink();
-});
+}
+$('settings-btn').addEventListener('click', () => sidebarAction('settings'));
 
 // ── Wallpaper ─────────────────────────────────────────────
 
@@ -7223,7 +7519,7 @@ async function openRemindersPanel() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>Reminders</h3>
       <div class="reminder-notice hidden" id="reminder-notice"></div>
       <div class="field">
@@ -8798,7 +9094,7 @@ async function openBlockedUsersPanel() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>Blocked contacts</h3>
       <div class="reminder-list" id="blocked-list" style="margin-top:0; padding-top:0; border-top:none;"></div>
       <div class="modal-actions">
@@ -8867,7 +9163,7 @@ function openContactInfo() {
      </button>`;
 
   box.innerHTML = `
-    <div class="modal-card contact-info-card">
+    <div class="modal-card contact-info-card" data-panel="right" data-panel-title="Contact info">
       <div class="contact-info-hero">
         <div class="avatar" style="width:96px;height:96px;font-size:34px;background:${escapeAttr(peer.avatarColor)}">${avatarInner(peer)}</div>
         <div class="contact-info-name">${escapeHtml(peer.displayName)}</div>
@@ -8886,6 +9182,7 @@ function openContactInfo() {
         ${row('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', 'search')}
         ${row('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>', 'ringtone')}
         ${row('<path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>', 'clear', 'danger')}
+        ${row('<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>', 'encryption', 'two-line')}
         ${row('<circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/>', 'block', 'danger')}
       </div>
 
@@ -8912,6 +9209,8 @@ function openContactInfo() {
     label('search', 'Search in chat');
     label('ringtone', `Ringtone: ${F.RINGTONES[F.ringtoneFor(peer.id)].name}${F.ringtoneOverride(peer.id) ? '' : ' (default)'}`);
     label('clear', 'Clear chat');
+    const enc = box.querySelector('[data-act="encryption"] span');
+    if (enc) enc.innerHTML = 'Encryption<small>Messages are end-to-end encrypted. Click to verify.</small>';
     label('block', state.blockedIds.has(peer.id) ? `Unblock ${peer.displayName}` : `Block ${peer.displayName}`);
   };
   refresh();
@@ -8925,6 +9224,7 @@ function openContactInfo() {
       else if (act === 'ringtone') { close(); F.openRingtonePicker(peer.id, peer.displayName); }
       else if (act === 'clear') { close(); clearActiveChat(); }
       else if (act === 'block') { await toggleBlockActiveChatPeer(); refresh(); }
+      else if (act === 'encryption') openEncryptionInfo(convo);
     });
   });
 }
@@ -8935,16 +9235,30 @@ async function openStoragePanel() {
   const box = document.createElement('div');
   box.className = 'modal-backdrop';
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>Storage &amp; data</h3>
       <p class="appearance-note" style="margin:-4px 0 16px">
-        Messages and media you've opened are kept on this device, so chats load
-        instantly and work offline. The server keeps only the encrypted copy.
+        This device is the storage for your chats. Messages, voice notes, photos
+        and videos you've opened are saved here, so chats load instantly and work
+        offline. Clearing them deletes them from this device.
       </p>
       <div class="storage-stat"><span>On this device</span><b id="storage-used">…</b></div>
-      <div class="storage-stat"><span>Cached messages</span><b id="storage-msgs">…</b></div>
+      ${STORAGE_KINDS.map(([kind, label]) => `
+        <div class="storage-stat storage-kind">
+          <span>${label}<small data-size="${kind}">…</small></span>
+          <button type="button" class="storage-clear-one" data-clear="${kind}">Clear</button>
+        </div>`).join('')}
+      <h4 class="storage-subhead">Automatic download</h4>
+      <p class="appearance-note" style="margin:0 0 6px">Choose what downloads on its own when you open a chat. Anything else shows “tap to download”.</p>
+      ${[['photos', 'Photos'], ['voice', 'Voice notes'], ['videos', 'Videos']].map(([kind, label]) => `
+        <label class="storage-stat"><span>${label}</span>
+          <select class="storage-auto" data-auto="${kind}">
+            <option value="1"${autoDownloadOn(kind) ? ' selected' : ''}>Automatic</option>
+            <option value="0"${autoDownloadOn(kind) ? '' : ' selected'}>Tap to download</option>
+          </select>
+        </label>`).join('')}
       <div class="modal-actions" style="justify-content:space-between">
-        <button type="button" class="btn-danger" id="storage-clear">Clear downloaded data</button>
+        <button type="button" class="btn-danger" id="storage-clear">Clear all</button>
         <button type="button" class="btn-primary" id="storage-close" style="width:auto;margin-top:0;padding:10px 22px">Done</button>
       </div>
     </div>`;
@@ -8954,24 +9268,69 @@ async function openStoragePanel() {
   box.querySelector('#storage-close').addEventListener('click', close);
 
   const fill = async () => {
-    const [usage, counts] = await Promise.all([localStore.usage(), localStore.counts()]);
+    const [usage, parts] = await Promise.all([localStore.usage(), localStore.breakdown()]);
     box.querySelector('#storage-used').textContent =
       usage?.usage != null ? formatBytes(usage.usage) : 'n/a';
-    box.querySelector('#storage-msgs').textContent = String(counts.messages ?? 0);
+    for (const [kind] of STORAGE_KINDS) {
+      const p = parts[kind];
+      box.querySelector(`[data-size="${kind}"]`).textContent =
+        `${p.count} ${p.count === 1 ? 'item' : 'items'} · ${p.bytes ? formatBytes(p.bytes) : '0 B'}`;
+    }
   };
   fill();
 
+  box.querySelectorAll('[data-auto]').forEach((sel) => {
+    sel.addEventListener('change', () => setAutoDownload(sel.dataset.auto, sel.value === '1'));
+  });
+
+  box.querySelectorAll('[data-clear]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const kind = btn.dataset.clear;
+      const label = STORAGE_KINDS.find(([k]) => k === kind)[1].toLowerCase();
+      if (!confirm(`Delete all ${label} from this device?`)) return;
+      btn.disabled = true;
+      markCleared([kind]);
+      await localStore.clearCategory(kind);
+      dropClearedFromView();
+      btn.disabled = false;
+      toast(`${label[0].toUpperCase()}${label.slice(1)} cleared from this device.`);
+      fill();
+    });
+  });
+
   box.querySelector('#storage-clear').addEventListener('click', async () => {
-    if (!confirm('Clear all downloaded messages and media from this device? They stay on the server and re-download as you open chats.')) return;
+    if (!confirm('Delete all messages, voice notes, photos, videos and cache from this device?')) return;
     const btn = box.querySelector('#storage-clear');
     btn.disabled = true;
+    markCleared(STORAGE_KINDS.map(([k]) => k));
     await localStore.clear();
-    inlineMediaUrls.clear();
-    toast('On-device data cleared.');
+    dropClearedFromView();
+    toast('All data cleared from this device.');
     fill();
     btn.disabled = false;
   });
 }
+
+/** Take whatever was just cleared out of the open chat and the chat list. */
+function dropClearedFromView() {
+  inlineMediaUrls.clear();
+  for (const [id, list] of state.messages) {
+    state.messages.set(id, list.filter((m) => m.pending || !isCleared(m, state.plaintext.get(m.id))));
+  }
+  for (const c of state.conversations.values()) {
+    if (c.lastMessage && isCleared(c.lastMessage, state.plaintext.get(c.lastMessage.id))) c.lastMessage = null;
+  }
+  if (state.activeId) renderMessages();
+  renderChatList();
+}
+
+const STORAGE_KINDS = [
+  ['messages', 'Messages'],
+  ['voice', 'Voice notes'],
+  ['photos', 'Photos'],
+  ['videos', 'Videos'],
+  ['cache', 'Cache'],
+];
 
 // ── Mark all as read ─────────────────────────────────────────
 
@@ -9739,7 +10098,7 @@ async function openAppLockSettings() {
 
   const methodLabel = { pin: 'A PIN', pattern: 'A pattern', biometric: 'Biometric unlock' };
   box.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card" data-panel>
       <h3>App lock</h3>
       ${method ? `
         <p class="auth-sub" style="margin-bottom:18px;">${methodLabel[method]} is set on this device.</p>
@@ -10017,26 +10376,58 @@ $('chat-search-prev').addEventListener('click', () => stepSearch(-1));
 $('chat-search-next').addEventListener('click', () => stepSearch(1));
 
 function notify(convo, message) {
+  if (state.me?.notifyMessages === false) return;             // turned off in Chat features
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  // Not while that chat is already open in front of them.
+  if (!document.hidden && state.activeId === convo.id) return;
+
   const plain = state.plaintext.get(message.id);
   let body;
   switch (message.kind) {
-    case 'file':     body = 'Sent an attachment'; break;
-    case 'voice':    body = 'Sent a voice message'; break;
-    case 'location': body = 'Shared a location'; break;
-    case 'contact':  body = 'Shared a contact'; break;
+    case 'voice':    body = '🎤 Voice message'; break;
+    case 'location': body = '📍 Location'; break;
+    case 'contact':  body = '👤 Contact'; break;
+    case 'poll':     body = '📊 Poll'; break;
+    case 'product':  body = '🛍️ Product'; break;
+    case 'file': {
+      let meta = {};
+      try { meta = JSON.parse(plain) || {}; } catch { /* not readable here */ }
+      const mime = meta.mime || '';
+      body = mime.startsWith('image/') ? '📷 Photo' : mime.startsWith('video/') ? '🎥 Video'
+        : mime.startsWith('audio/') ? '🎵 Audio' : `📄 ${meta.name || 'File'}`;
+      break;
+    }
     default:         body = typeof plain === 'string' ? F.textOf(plain) : 'New message';
   }
 
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  // Locked chats never show who or what in a notification.
-  const title = convo.locked ? 'Veyon Chat' : convo.kind === 'group' ? convo.title : convo.peer.displayName;
-  new Notification(title, { body: convo.locked ? 'New message' : body.slice(0, 120) });
+  // Who sent it: the person, or "Person @ Group" in a group.
+  const sender = senderInfo(convo, message.senderId)?.displayName || 'Someone';
+  const title = convo.kind === 'group' ? `${sender} @ ${convo.title}` : convo.peer.displayName;
+  // Locked / private-PIN chats never show who or what in a notification.
+  const n = new Notification(convo.locked ? 'Veyon Chat' : title, {
+    body: convo.locked ? 'New message' : body.slice(0, 140),
+    tag: `chat-${convo.id}`,
+    renotify: true,
+    icon: '/icons/icon-192.png',
+  });
+  n.onclick = () => { window.focus(); openConversation(convo.id); n.close(); };
+}
+
+// A notification clicked while this tab was closed or in the background.
+navigator.serviceWorker?.addEventListener('message', (e) => {
+  if (e.data?.type === 'open-chat' && state.me) openConversation(e.data.conversationId);
+});
+function openChatFromLink() {
+  const m = location.hash.match(/^#chat=([\w-]+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname);
+  if (state.conversations.has(m[1])) openConversation(m[1]);
 }
 
 if ('Notification' in window && Notification.permission === 'default') {
   // Ask only after a real interaction — browsers reject an immediate prompt.
   document.addEventListener('click', function ask() {
-    Notification.requestPermission();
+    Notification.requestPermission().then((p) => { if (p === 'granted' && state.me) ensurePushSubscription(); });
     document.removeEventListener('click', ask);
   }, { once: true });
 }
@@ -10240,7 +10631,7 @@ F.bindFeatures({
   sendJsonMessage, sendMediaFile, jumpToMessage, loadOlderMessages, directContacts,
   openLinkedDevicesPanel, openLiveGameModal, sendGameSignal, signOut,
   openAddMember, startChatWith, openConversation, createGroup, loadConversations,
-  iconPlay, iconPause, closeActiveChat,
+  iconPlay, iconPause, closeActiveChat, ensurePushSubscription, sidebarAction,
   startCall, startOrJoinGroupCall, renderGroupCallTiles,
 });
 
@@ -10249,6 +10640,7 @@ F.bindFeatures({
 window.addEventListener('hashchange', () => { if (state.me) F.checkInviteHash(); });
 
 $('calls-btn').addEventListener('click', () => F.openCallsPanel());
+F.initPanels();   // big screens open as pages in the sidebar (like WhatsApp Web)
 
 // "Forgot password?" — finishes by signing in with the new password.
 $('forgot-password').addEventListener('click', () => F.openForgotPassword((username, password) => {

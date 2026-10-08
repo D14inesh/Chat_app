@@ -2,6 +2,11 @@
 receipts, reactions, edit/delete, 1:1 WebRTC call signaling, group call
 rooms, and live-game relay.
 
+Several API workers run side by side (Nginx spreads users over them). Each
+worker only holds its own sockets; delivering a frame, who's online,
+ringing calls and group call seats are shared through Redis — see
+app/core/bus.py. Without Redis it's all in this process, as before.
+
 Connection liveness: the Node version manually pings every socket every 30s
 and terminates non-answering ones (`ws.ping()`/`ws.on('pong')`). Here that's
 delegated to uvicorn's underlying `websockets` implementation, which already
@@ -11,25 +16,60 @@ the same on_close cleanup path either way. The separate JSON-level
 `{"type": "ping"}` -> `{"type": "pong"}` handled in dispatch() below is a
 distinct, additional app-level feature and is preserved as-is.
 """
-import asyncio
+import itertools
 import json
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
-from app.core.security import COOKIE_NAME, verify_session_live
+from app.core import bus
+from app.core.security import COOKIE_NAME, set_cached_epoch, verify_session_live
 from app.core.database import is_blocked_either_way, one, query, transaction
+from app.utils import notify_push
+from app.utils import signal_envelopes as sig
 from app.utils.age import require_direct_allowed
 from app.utils.serializers import shape_message
 
-# userId -> set[WebSocket] — a Set, not a single socket, so the same account
-# open in several tabs/devices at once gets every event.
+# userId -> set[WebSocket] open on THIS worker — a Set, not a single socket,
+# so the same account open in several tabs/devices at once gets every event.
 sockets: dict[str, set[WebSocket]] = {}
 
 # The session epoch each socket signed in with — "log out other devices"
 # closes every socket older than the new epoch (see close_sessions_older_than).
 socket_epochs: dict[WebSocket, int] = {}
+
+# Which phone/browser each socket is, and its Signal device number (if it
+# has registered keys) — a Signal message is delivered to each socket as
+# the one sealed copy made for that device.
+socket_clients: dict[WebSocket, str | None] = {}
+socket_signal_devices: dict[WebSocket, int | None] = {}
+
+
+# Every socket's id, unique across workers ("<worker>:<n>"), so any worker
+# can address one exact socket (a group call seat) through the bus.
+socket_ids: dict[WebSocket, str] = {}
+_by_sid: dict[str, WebSocket] = {}
+_sid_counter = itertools.count(1)
+
+
+async def set_signal_device(user_id: str, client: str, device: int | None):
+    await bus.publish({"t": "sigdev", "u": str(user_id), "c": client, "d": device})
+
+
+async def notify_contacts_devices_changed(user_id: str):
+    """Someone added/replaced a device: everyone who chats with them (and
+    their own other devices) refreshes the device list before sending."""
+    rows = await query(
+        """SELECT DISTINCT cm2.user_id FROM conversation_members cm1
+             JOIN conversation_members cm2 ON cm2.conversation_id = cm1.conversation_id
+            WHERE cm1.user_id = $1""",
+        user_id,
+    )
+    frame = {"type": "signal-devices-changed", "userId": str(user_id)}
+    for r in rows:
+        await fanout(str(r["user_id"]), frame)
+    await fanout(str(user_id), frame)
 
 # Disappearing-message timers a chat can be set to (seconds): off, 24 hours,
 # 7 days, 90 days — the same choices WhatsApp offers.
@@ -44,21 +84,24 @@ _EXPIRES_SQL = """(SELECT CASE WHEN disappear_seconds > 0
 _MESSAGE_COLUMNS = ("id, sender_id, kind, ciphertext, iv, file_path, file_size, created_at, reply_to_id, view_once, "
                     "expires_at, poll_closes_at, mention_all")
 
-# conversationId -> {userId: WebSocket} — group call seat map. Guarded by
-# _group_call_lock (see on_group_call_join) so the "who's here / evict my
-# stale tab / take my seat" sequence is atomic even though, unlike Node,
-# every send() here is itself an `await` and could otherwise interleave with
-# another client's join arriving in between.
-group_call_rooms: dict[str, dict[str, WebSocket]] = {}
-_group_call_lock = asyncio.Lock()
+# Group call seats live in Redis: hash veyon:room:<conversationId> =
+# {userId: socket id}. Changes to one room are serialised with a lock every
+# worker respects (bus.lock), so "who's here / evict my stale tab / take my
+# seat" stays atomic across workers. _my_rooms is just this worker's index of
+# the rooms its sockets sit in (to leave them all on disconnect).
+_my_rooms: dict[str, set[str]] = {}
 
 GROUP_CALL_CAP = {"video": 4, "audio": 6}
 
-# conversationId -> call_logs.id of the 1:1 call ringing/going on there, so
-# a renegotiation offer mid-call isn't logged as a new call.
-active_calls: dict[str, int] = {}
-# (conversationId, userId) -> call_logs.id of my seat in a group call.
-group_call_logs: dict[tuple[str, str], int] = {}
+# veyon:calls = {conversationId: call_logs.id} of the 1:1 call ringing/going
+# on there, so a renegotiation offer mid-call isn't logged as a new call.
+# veyon:gclog = {"<conversationId>|<userId>": call_logs.id} of a group seat.
+CALLS = "veyon:calls"
+GROUP_CALL_LOGS = "veyon:gclog"
+
+
+def _room(conversation_id: str) -> str:
+    return f"veyon:room:{conversation_id}"
 
 
 def _now_iso() -> str:
@@ -91,22 +134,80 @@ async def send(ws: WebSocket, obj: dict):
         pass  # socket already gone; caller doesn't need to know
 
 
+def _dumps(obj: dict) -> str:
+    return json.dumps(obj, default=_json_default)
+
+
+async def _send_text(ws: WebSocket, text: str):
+    try:
+        await ws.send_text(text)
+    except Exception:
+        pass
+
+
 async def fanout(user_id: str, obj: dict, except_ws: WebSocket | None = None):
-    """Send to every socket a user has open, optionally skipping one."""
-    conns = sockets.get(user_id)
-    if not conns:
-        return
-    for ws in list(conns):
-        if ws is not except_ws:
-            await send(ws, obj)
+    """Send to every socket a user has open — on any worker — optionally
+    skipping one."""
+    await bus.publish({"t": "user", "u": str(user_id), "m": _dumps(obj),
+                       "x": socket_ids.get(except_ws) if except_ws is not None else None})
 
 
-def is_online(user_id: str) -> bool:
-    return user_id in sockets
+async def fanout_sealed(user_id: str, frame: dict, sealed: dict, except_ws: WebSocket | None = None,
+                        field: str = "message"):
+    """Like fanout(), for a Signal message: each socket gets the frame with
+    its own device's sealed copy — in frame["message"]["envelope"], or in
+    frame["envelope"] when field is "" (an edit)."""
+    mine = {str(dev): env for (uid, dev), env in sealed.items() if str(uid) == str(user_id)}
+    await bus.publish({"t": "sealed", "u": str(user_id), "m": _dumps(frame), "e": mine, "f": field,
+                       "x": socket_ids.get(except_ws) if except_ws is not None else None})
 
 
-def online_user_ids() -> list[str]:
-    return list(sockets.keys())
+async def _on_bus(ev: dict):
+    """Runs on every worker for every published event."""
+    t, user = ev.get("t"), ev.get("u")
+    if t == "user":
+        for ws in list(sockets.get(user, ())):
+            if socket_ids.get(ws) != ev.get("x"):
+                await _send_text(ws, ev["m"])
+    elif t == "sealed":
+        frame = json.loads(ev["m"])
+        for ws in list(sockets.get(user, ())):
+            if socket_ids.get(ws) == ev.get("x"):
+                continue
+            env = ev["e"].get(str(socket_signal_devices.get(ws)))
+            if ev.get("f") == "message":
+                out = {**frame, "message": {**frame["message"], "envelope": env}}
+            else:
+                out = {**frame, "envelope": env}
+            await send(ws, out)
+    elif t == "sock":
+        ws = _by_sid.get(ev.get("s"))
+        if ws is not None:
+            await _send_text(ws, ev["m"])
+    elif t == "close":
+        for ws in list(sockets.get(user, ())):
+            if socket_epochs.get(ws, 0) < ev["epoch"]:
+                try:
+                    await ws.close(code=4001, reason="Signed out from another device")
+                except Exception:  # noqa: BLE001
+                    pass
+    elif t == "sigdev":
+        for ws in sockets.get(user, ()):
+            if socket_clients.get(ws) == ev.get("c"):
+                socket_signal_devices[ws] = ev.get("d")
+    elif t == "epoch":
+        set_cached_epoch(user, int(ev["epoch"]))
+
+
+bus.on_event(_on_bus)
+
+
+async def is_online(user_id: str) -> bool:
+    return await bus.is_online(str(user_id))
+
+
+async def online_user_ids() -> list[str]:
+    return await bus.online_user_ids()
 
 
 async def notify_user(user_id: str, obj: dict):
@@ -116,14 +217,10 @@ async def notify_user(user_id: str, obj: dict):
 
 
 async def close_sessions_older_than(user_id: str, epoch: int):
-    """Closes the user's sockets that signed in before `epoch` (code 4001 =
-    signed out). The device that asked reconnects with its new token."""
-    for ws in list(sockets.get(user_id, ())):
-        if socket_epochs.get(ws, 0) < epoch:
-            try:
-                await ws.close(code=4001, reason="Signed out from another device")
-            except Exception:  # noqa: BLE001
-                pass
+    """Closes the user's sockets (on every worker) that signed in before
+    `epoch` (code 4001 = signed out). The device that asked reconnects with
+    its new token."""
+    await bus.publish({"t": "close", "u": str(user_id), "epoch": epoch})
 
 
 async def handle_connection(websocket: WebSocket):
@@ -137,10 +234,17 @@ async def handle_connection(websocket: WebSocket):
 
     await websocket.accept()
     socket_epochs[websocket] = epoch
+    from app.api.v1.signal import my_signal_device
+    from app.utils.devices import device_id as client_of
+    socket_clients[websocket] = client_of(websocket)
+    socket_signal_devices[websocket] = await my_signal_device(user_id, socket_clients[websocket])
+    sid = f"{bus.WORKER}:{next(_sid_counter)}"
+    socket_ids[websocket] = sid
+    _by_sid[sid] = websocket
     sockets.setdefault(user_id, set()).add(websocket)
 
-    # First socket for this user = they just came online.
-    if len(sockets[user_id]) == 1:
+    # First socket for this user, on any worker = they just came online.
+    if await bus.socket_opened(user_id):
         await query("UPDATE users SET last_seen = now() WHERE id = $1", user_id)
         await broadcast_presence(user_id, True)
 
@@ -165,16 +269,21 @@ async def handle_connection(websocket: WebSocket):
         pass
     finally:
         socket_epochs.pop(websocket, None)
+        socket_clients.pop(websocket, None)
+        socket_signal_devices.pop(websocket, None)
         await leave_all_group_call_rooms(websocket, user_id)
+        _by_sid.pop(socket_ids.pop(websocket, None), None)
 
         conns = sockets.get(user_id)
         if conns is not None:
             conns.discard(websocket)
             if not conns:
                 del sockets[user_id]
-                await end_calls_of(user_id)
-                await query("UPDATE users SET last_seen = now() WHERE id = $1", user_id)
-                await broadcast_presence(user_id, False)
+        # Their last socket on any worker = they just went offline.
+        if await bus.socket_closed(user_id):
+            await end_calls_of(user_id)
+            await query("UPDATE users SET last_seen = now() WHERE id = $1", user_id)
+            await broadcast_presence(user_id, False)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -290,6 +399,19 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
             valid_reply_to_id = reply_to_id
 
     recipients = [i for i in ctx["memberIds"] if i != user_id]
+    online = await bus.online_among(recipients)
+
+    # Signal: one sealed copy per device, checked against the current devices.
+    envelopes = None
+    if sig.is_signal(ciphertext):
+        sender_device = socket_signal_devices.get(ws)
+        envelopes = sig.parse(msg.get("envelopes"))
+        if sender_device is None or envelopes is None:
+            return await send(ws, {"type": "error", "error": "This device isn't set up for encryption yet — reload the page.", "tempId": temp_id})
+        wrong = sig.mismatch(envelopes, await sig.expected_devices(ctx["memberIds"], user_id, sender_device))
+        if wrong:
+            return await send(ws, {"type": "signal-mismatch", "tempId": temp_id, "conversationId": conversation_id, "devices": wrong})
+        iv = f"signal:{sender_device}"
 
     async with transaction() as conn:
         row = await conn.fetchrow(
@@ -301,18 +423,30 @@ async def on_send(ws: WebSocket, user_id: str, msg: dict):
             poll_closes_at, mention_all,
         )
         row = dict(row)
+        if envelopes is not None:
+            await sig.store(conn, row["id"], envelopes)
         for rid in recipients:
             await conn.execute(
                 "INSERT INTO message_receipts (message_id, user_id, delivered_at) VALUES ($1, $2, $3)",
-                row["id"], rid, datetime.now(timezone.utc) if rid in sockets else None,
+                row["id"], rid, datetime.now(timezone.utc) if str(rid) in online else None,
             )
 
     payload = shape_message(row)
 
     await send(ws, {"type": "sent", "tempId": temp_id, "message": payload, "conversationId": conversation_id})
-    for rid in recipients:
-        await fanout(rid, {"type": "message", "conversationId": conversation_id, "message": payload})
-    await fanout(user_id, {"type": "message", "conversationId": conversation_id, "message": payload}, ws)
+    frame = {"type": "message", "conversationId": conversation_id, "message": payload}
+    if envelopes is not None:
+        sealed = sig.by_device(envelopes)
+        for rid in recipients:
+            await fanout_sealed(rid, frame, sealed)
+        await fanout_sealed(user_id, frame, sealed, ws)
+    else:
+        for rid in recipients:
+            await fanout(rid, frame)
+        await fanout(user_id, frame, ws)
+    # People with no tab or app open get a push notification instead.
+    notify_push.fire(notify_push.message(
+        conversation_id, user_id, kind, mention_all, [r for r in recipients if str(r) not in online]))
 
     # A business that's "away" answers a customer automatically.
     if ctx["kind"] == "direct" and recipients:
@@ -361,6 +495,11 @@ async def on_read(ws: WebSocket, user_id: str, msg: dict):
         return
 
     await send(ws, {"type": "read-cleared", "conversationId": conversation_id})
+
+    # Read receipts off (either person, 1-to-1 chats): no blue ticks sent.
+    from app.utils.privacy import reads_hidden
+    if await reads_hidden(conversation_id):
+        return
 
     by_sender: dict[str, list] = {}
     for r in rows:
@@ -436,6 +575,17 @@ async def on_edit_message(ws: WebSocket, user_id: str, msg: dict):
         return await send(ws, {"type": "error", "error": "You can only edit your own messages."})
     if row["kind"] != "text":
         return await send(ws, {"type": "error", "error": "Only text messages can be edited."})
+    envelopes = None
+    if sig.is_signal(ciphertext):
+        sender_device = socket_signal_devices.get(ws)
+        envelopes = sig.parse(msg.get("envelopes"))
+        if sender_device is None or envelopes is None:
+            return await send(ws, {"type": "error", "error": "This device isn't set up for encryption yet — reload the page."})
+        ctx = await conversation_context(conversation_id)
+        wrong = sig.mismatch(envelopes, await sig.expected_devices(ctx["memberIds"], user_id, sender_device))
+        if wrong:
+            return await send(ws, {"type": "signal-mismatch", "editOf": message_id, "conversationId": conversation_id, "devices": wrong})
+        iv = f"signal:{sender_device}"
     # Keep the version being replaced, for "Edit history".
     await query(
         "INSERT INTO message_edits (message_id, ciphertext, iv, written_at) VALUES ($1, $2, $3, $4)",
@@ -446,12 +596,17 @@ async def on_edit_message(ws: WebSocket, user_id: str, msg: dict):
         "UPDATE messages SET ciphertext = $1, iv = $2, edited_at = now() WHERE id = $3 RETURNING edited_at",
         ciphertext, iv, message_id,
     )
+    if envelopes is not None:
+        async with transaction() as conn:
+            await sig.store(conn, message_id, envelopes)
 
+    edited = {"type": "message-edited", "conversationId": conversation_id, "messageId": message_id,
+              "ciphertext": ciphertext, "iv": iv, "editedAt": updated["edited_at"]}
     for rid in await member_ids(conversation_id):
-        await fanout(rid, {
-            "type": "message-edited", "conversationId": conversation_id, "messageId": message_id,
-            "ciphertext": ciphertext, "iv": iv, "editedAt": updated["edited_at"],
-        })
+        if envelopes is None:
+            await fanout(rid, edited)
+            continue
+        await fanout_sealed(rid, edited, sig.by_device(envelopes), field="")
 
 
 async def _message_in(conversation_id: str, message_id: str) -> dict | None:
@@ -632,7 +787,9 @@ async def broadcast_presence(user_id: str, online: bool):
              JOIN conversation_members other
                ON other.conversation_id = mine.conversation_id
               AND other.user_id <> mine.user_id
-            WHERE mine.user_id = $1""",
+            WHERE mine.user_id = $1
+              -- Only people allowed to see my last seen / online (Privacy).
+              AND veyon_can_see($1, other.user_id, (SELECT last_seen_privacy FROM users WHERE id = $1))""",
         user_id,
     )
     for r in rows:
@@ -665,6 +822,8 @@ async def on_call_offer(ws: WebSocket, user_id: str, msg: dict):
         return await send(ws, {"type": "call-error", "conversationId": conversation_id, "error": e.detail})
 
     await log_call_offer(conversation_id, user_id, to_user_id, call_type)
+    if not await is_online(to_user_id):   # nothing open to ring on: push a notification
+        notify_push.fire(notify_push.call(conversation_id, user_id, to_user_id, call_type))
     await fanout(to_user_id, {"type": "call-offer", "conversationId": conversation_id, "fromUserId": user_id, "callType": call_type, "sdp": sdp})
     await fanout(user_id, {"type": "call-started-elsewhere", "conversationId": conversation_id, "toUserId": to_user_id, "callType": call_type}, ws)
 
@@ -687,8 +846,8 @@ async def on_call_decline(ws: WebSocket, user_id: str, msg: dict):
         return
     # The caller hanging up while it rings also arrives as a decline — for
     # the person being called that's a missed call, not a declined one.
-    log_id = active_calls.get(conversation_id)
-    caller = await one("SELECT caller_id FROM call_logs WHERE id = $1", log_id) if log_id else None
+    log_id = await bus.hget(CALLS, conversation_id)
+    caller = await one("SELECT caller_id FROM call_logs WHERE id = $1", int(log_id)) if log_id else None
     await log_call_status(conversation_id, "ended" if caller and str(caller["caller_id"]) == str(user_id) else "declined")
     await fanout(to_user_id, {"type": "call-decline", "conversationId": conversation_id, "fromUserId": user_id})
     await fanout(user_id, {"type": "call-claimed", "conversationId": conversation_id}, ws)
@@ -715,9 +874,9 @@ async def on_call_end(ws: WebSocket, user_id: str, msg: dict):
 # ── Call history ─────────────────────────────────────────────
 
 async def log_call_offer(conversation_id: str, caller: str, callee: str, call_type: str):
-    log_id = active_calls.get(conversation_id)
+    log_id = await bus.hget(CALLS, conversation_id)
     if log_id:
-        row = await one("SELECT status, started_at FROM call_logs WHERE id = $1", log_id)
+        row = await one("SELECT status, started_at FROM call_logs WHERE id = $1", int(log_id))
         fresh = row and (row["status"] == "answered" or (datetime.now(timezone.utc) - row["started_at"]).total_seconds() < 90)
         if fresh:
             return  # renegotiation of the same call
@@ -726,18 +885,19 @@ async def log_call_offer(conversation_id: str, caller: str, callee: str, call_ty
         "INSERT INTO call_logs (conversation_id, caller_id, callee_id, call_type) VALUES ($1, $2, $3, $4) RETURNING id",
         conversation_id, caller, callee, call_type,
     )
-    active_calls[conversation_id] = row["id"]
+    await bus.hset(CALLS, conversation_id, str(row["id"]))
 
 
 async def log_call_status(conversation_id: str, event: str):
     """event: answered | declined | ended. Ending an unanswered call = missed."""
-    log_id = active_calls.get(conversation_id)
+    log_id = await bus.hget(CALLS, conversation_id)
     if not log_id:
         return
+    log_id = int(log_id)
     if event == "answered":
         await query("UPDATE call_logs SET status = 'answered', answered_at = coalesce(answered_at, now()) WHERE id = $1", log_id)
         return
-    active_calls.pop(conversation_id, None)
+    await bus.hdel(CALLS, conversation_id)
     row = await one(
         """UPDATE call_logs SET ended_at = now(),
                   status = CASE WHEN $2 = 'declined' THEN 'declined'
@@ -753,8 +913,8 @@ async def log_call_status(conversation_id: str, event: str):
 
 async def end_calls_of(user_id: str):
     """Their last connection dropped: close any 1:1 call they were in."""
-    for conversation_id, log_id in list(active_calls.items()):
-        row = await one("SELECT 1 FROM call_logs WHERE id = $1 AND (caller_id = $2 OR callee_id = $2)", log_id, user_id)
+    for conversation_id, log_id in (await bus.hgetall(CALLS)).items():
+        row = await one("SELECT 1 FROM call_logs WHERE id = $1 AND (caller_id = $2 OR callee_id = $2)", int(log_id), user_id)
         if row:
             await log_call_status(conversation_id, "ended")
 
@@ -792,8 +952,8 @@ async def on_group_call_query(ws: WebSocket, user_id: str, msg: dict):
     ctx = await conversation_context(conversation_id)
     if not ctx or user_id not in ctx["memberIds"]:
         return
-    room = group_call_rooms.get(conversation_id)
-    await send(ws, {"type": "group-call-state", "conversationId": conversation_id, "participantIds": list(room.keys()) if room else []})
+    room = await bus.hgetall(_room(conversation_id))
+    await send(ws, {"type": "group-call-state", "conversationId": conversation_id, "participantIds": list(room)})
 
 
 async def on_group_call_join(ws: WebSocket, user_id: str, msg: dict):
@@ -808,13 +968,12 @@ async def on_group_call_join(ws: WebSocket, user_id: str, msg: dict):
     if ctx["kind"] != "group":
         return await send(ws, {"type": "group-call-error", "conversationId": conversation_id, "error": "Group calling is only available in groups."})
 
-    # Guarded by a lock (unlike hub.js's reliance on Node's implicit
-    # run-to-completion-between-awaits) because every send() here is itself
-    # an `await` in Python and could otherwise let a second join interleave
-    # mid-sequence — see the module docstring.
-    async with _group_call_lock:
-        room = group_call_rooms.get(conversation_id)
-        existing = list(room.keys()) if room else []
+    # Guarded by a lock every worker respects: every await here could
+    # otherwise let a second join (on this or another worker) interleave.
+    my_sid = socket_ids.get(ws)
+    async with bus.lock(f"room:{conversation_id}"):
+        room = await bus.hgetall(_room(conversation_id))
+        existing = list(room)
 
         if user_id not in existing and len(existing) >= GROUP_CALL_CAP[call_type]:
             return await send(ws, {
@@ -822,28 +981,28 @@ async def on_group_call_join(ws: WebSocket, user_id: str, msg: dict):
                 "error": f"This call is full (max {GROUP_CALL_CAP[call_type]} for {call_type}).",
             })
 
-        if room is None:
-            room = {}
-            group_call_rooms[conversation_id] = room
-
-        stale_ws = room.get(user_id)
-        if stale_ws is not None and stale_ws is not ws:
-            await send(stale_ws, {"type": "group-call-claimed", "conversationId": conversation_id})
+        stale_sid = room.get(user_id)
+        if stale_sid is not None and stale_sid != my_sid:
+            # My other tab/phone had the seat: tell it, and take the seat.
+            await bus.publish({"t": "sock", "s": stale_sid,
+                               "m": _dumps({"type": "group-call-claimed", "conversationId": conversation_id})})
             del room[user_id]
             for rid in ctx["memberIds"]:
                 await fanout(rid, {"type": "group-call-participant-left", "conversationId": conversation_id, "userId": user_id}, ws)
 
-        participant_ids = list(room.keys())  # snapshot BEFORE adding self
-        room[user_id] = ws
+        participant_ids = [u for u in room if u != user_id]  # snapshot BEFORE adding self
+        await bus.hset(_room(conversation_id), user_id, my_sid)
+        _my_rooms.setdefault(my_sid, set()).add(conversation_id)
 
         await send(ws, {"type": "group-call-state", "conversationId": conversation_id, "participantIds": participant_ids})
-        if (conversation_id, user_id) not in group_call_logs:
+        seat = f"{conversation_id}|{user_id}"
+        if not await bus.hget(GROUP_CALL_LOGS, seat):
             row = await one(
                 """INSERT INTO call_logs (conversation_id, caller_id, is_group, call_type, status, answered_at)
                    VALUES ($1, $2, true, $3, 'answered', now()) RETURNING id""",
                 conversation_id, user_id, msg.get("callType") if msg.get("callType") in ("audio", "video") else "audio",
             )
-            group_call_logs[(conversation_id, user_id)] = row["id"]
+            await bus.hset(GROUP_CALL_LOGS, seat, str(row["id"]))
         for rid in ctx["memberIds"]:
             await fanout(rid, {"type": "group-call-participant-joined", "conversationId": conversation_id, "userId": user_id}, ws)
 
@@ -856,24 +1015,27 @@ async def on_group_call_leave(ws: WebSocket, user_id: str, msg: dict):
 
 
 async def remove_from_room(ws: WebSocket, user_id: str, conversation_id: str):
-    async with _group_call_lock:
-        room = group_call_rooms.get(conversation_id)
-        if not room or room.get(user_id) is not ws:
+    my_sid = socket_ids.get(ws)
+    async with bus.lock(f"room:{conversation_id}"):
+        if my_sid is None or await bus.hget(_room(conversation_id), user_id) != my_sid:
             return
-        del room[user_id]
-        if not room:
-            del group_call_rooms[conversation_id]
-    log_id = group_call_logs.pop((conversation_id, user_id), None)
+        await bus.hdel(_room(conversation_id), user_id)
+    _my_rooms.get(my_sid, set()).discard(conversation_id)
+    seat = f"{conversation_id}|{user_id}"
+    log_id = await bus.hget(GROUP_CALL_LOGS, seat)
     if log_id:
-        await query("UPDATE call_logs SET ended_at = now() WHERE id = $1", log_id)
+        await bus.hdel(GROUP_CALL_LOGS, seat)
+        await query("UPDATE call_logs SET ended_at = now() WHERE id = $1", int(log_id))
 
     for rid in await member_ids(conversation_id):
         await fanout(rid, {"type": "group-call-participant-left", "conversationId": conversation_id, "userId": user_id})
 
 
 async def leave_all_group_call_rooms(ws: WebSocket, user_id: str):
-    for conversation_id in list(group_call_rooms.keys()):
+    my_sid = socket_ids.get(ws)
+    for conversation_id in list(_my_rooms.get(my_sid, ())):
         await remove_from_room(ws, user_id, conversation_id)
+    _my_rooms.pop(my_sid, None)
 
 
 async def relay_group_call_frame(ws: WebSocket, user_id: str, msg: dict, frame_type: str):
@@ -882,8 +1044,8 @@ async def relay_group_call_frame(ws: WebSocket, user_id: str, msg: dict, frame_t
     if not conversation_id or not to_user_id:
         return
 
-    room = group_call_rooms.get(conversation_id)
-    both_present = bool(room) and room.get(user_id) is ws and to_user_id in room
+    room = await bus.hgetall(_room(conversation_id))
+    both_present = bool(room) and room.get(user_id) == socket_ids.get(ws) and to_user_id in room
     if not both_present:
         return await send(ws, {"type": "group-call-error", "conversationId": conversation_id, "error": "Peer left the call.", "peerId": to_user_id})
 
@@ -935,6 +1097,7 @@ async def deliver_scheduled_message(conversation_id: str, sender_id: str, cipher
         raise ValueError("Sender is no longer a member of that conversation.")
 
     recipients = [i for i in ctx["memberIds"] if i != sender_id]
+    online = await bus.online_among(recipients)
 
     async with transaction() as conn:
         row = await conn.fetchrow(
@@ -947,7 +1110,7 @@ async def deliver_scheduled_message(conversation_id: str, sender_id: str, cipher
         for rid in recipients:
             await conn.execute(
                 "INSERT INTO message_receipts (message_id, user_id, delivered_at) VALUES ($1, $2, $3)",
-                row["id"], rid, datetime.now(timezone.utc) if rid in sockets else None,
+                row["id"], rid, datetime.now(timezone.utc) if str(rid) in online else None,
             )
 
     payload = shape_message(row)

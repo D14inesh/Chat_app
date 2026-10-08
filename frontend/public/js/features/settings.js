@@ -15,6 +15,22 @@ export function openFeatureSettings() {
     <div class="settings-list">
       <label class="toggle-row">
         <span>
+          <span class="toggle-title">🔔 Message notifications</span>
+          <span class="toggle-sub">Who sent it and what — text, photo, voice message… (on every device you use)</span>
+        </span>
+        <input type="checkbox" class="switch" id="set-notify-messages" ${app.state.me?.notifyMessages !== false ? 'checked' : ''}>
+      </label>
+      <label class="toggle-row">
+        <span>
+          <span class="toggle-title">📞 Call notifications</span>
+          <span class="toggle-sub">Incoming voice and video calls, even when Veyon isn't open</span>
+        </span>
+        <input type="checkbox" class="switch" id="set-notify-calls" ${app.state.me?.notifyCalls !== false ? 'checked' : ''}>
+      </label>
+      <p class="join-note hidden" id="set-notify-blocked">Notifications are blocked in this browser — allow them
+        for this site (the 🔒 icon next to the address), then switch them on here.</p>
+      <label class="toggle-row">
+        <span>
           <span class="toggle-title">🎤 Auto voice-to-text</span>
           <span class="toggle-sub">Show the text of voice messages under them automatically (uses your server's speech service)</span>
         </span>
@@ -43,6 +59,29 @@ export function openFeatureSettings() {
     if (e.target.checked && app.state.activeId) app.renderMessages();
   });
   box.querySelector('#set-effects').addEventListener('change', (e) => prefs.set('effects', e.target.checked));
+
+  // Notifications: saved on the account (so pushes respect it too).
+  const blockedNote = box.querySelector('#set-notify-blocked');
+  const saveNotify = async (field, on, input) => {
+    try {
+      if (on && 'Notification' in window) {
+        const permission = Notification.permission === 'default'
+          ? await Notification.requestPermission() : Notification.permission;
+        blockedNote.classList.toggle('hidden', permission !== 'denied');
+        if (permission === 'granted') app.ensurePushSubscription();
+      }
+      const res = await app.api('/api/push/settings', { method: 'PATCH', body: JSON.stringify({ [field]: on }) });
+      app.state.me.notifyMessages = res.messages;
+      app.state.me.notifyCalls = res.calls;
+      app.toast(`${field === 'messages' ? 'Message' : 'Call'} notifications ${on ? 'on' : 'off'}.`);
+    } catch (err) {
+      input.checked = !on;
+      app.toast(err.message, true);
+    }
+  };
+  box.querySelector('#set-notify-messages').addEventListener('change', (e) => saveNotify('messages', e.target.checked, e.target));
+  box.querySelector('#set-notify-calls').addEventListener('change', (e) => saveNotify('calls', e.target.checked, e.target));
+  if ('Notification' in window && Notification.permission === 'denied') blockedNote.classList.remove('hidden');
   box.querySelector('#set-lang').addEventListener('click', () => pickLanguage(() => {
     box.querySelector('#set-lang-value').textContent = `${langName()} ›`;
   }));

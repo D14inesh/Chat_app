@@ -70,6 +70,51 @@ async function withStore(name, mode, fn) {
   return result;
 }
 
+/** Which bucket a stored media record belongs to, by its mime type (used
+ *  only for files no saved message points at). */
+function mediaKind(rec) {
+  const mime = String(rec?.mime || rec?.blob?.type || '').toLowerCase();
+  if (mime.startsWith('audio/')) return 'voice';
+  if (mime.startsWith('video/')) return 'videos';
+  if (mime.startsWith('image/') && mime !== 'image/gif') return 'photos';
+  return 'cache';
+}
+
+/** Which Storage & data bucket a message belongs to:
+ *  'messages' | 'voice' | 'photos' | 'videos' | 'cache' (stickers, GIFs, documents). */
+export function messageCategory(m, body) {
+  if (m?.kind === 'voice') return 'voice';
+  if (m?.kind !== 'file') return 'messages';
+  if (body && typeof body === 'object') {
+    if (body.sticker || body.gif) return 'cache';
+    const mime = String(body.mime || '').toLowerCase();
+    if (mime.startsWith('image/')) return 'photos';
+    if (mime.startsWith('video/')) return 'videos';
+  }
+  return 'cache';
+}
+
+// What the person cleared, per bucket: anything created at or before this time
+// is gone from this device and isn't shown again.
+const CLEARED_KEY = 'vesper-cleared-before';
+
+function readCleared() {
+  try { return JSON.parse(localStorage.getItem(CLEARED_KEY)) || {}; } catch { return {}; }
+}
+
+export function markCleared(categories) {
+  const now = Date.now();
+  const cur = readCleared();
+  for (const c of categories) cur[c] = now;
+  try { localStorage.setItem(CLEARED_KEY, JSON.stringify(cur)); } catch { /* ignore */ }
+}
+
+/** True when this message was cleared from this device. */
+export function isCleared(m, body) {
+  const at = readCleared()[messageCategory(m, body)];
+  return !!at && new Date(m?.createdAt).getTime() <= at;
+}
+
 export const localStore = {
   available() {
     return typeof indexedDB !== 'undefined';
@@ -153,6 +198,68 @@ export const localStore = {
         return { messages: msgs };
       });
     } catch { return { messages: 0 }; }
+  },
+
+  /** Size + count of what's on this device, split by bucket. */
+  async breakdown() {
+    const out = {};
+    for (const k of ['messages', 'voice', 'photos', 'videos', 'cache']) out[k] = { count: 0, bytes: 0 };
+    const pathKind = new Map();
+    try {
+      const rows = await withStore(MSG_STORE, 'readonly', (s) => reqAsPromise(s.getAll()));
+      for (const r of rows || []) {
+        const kind = messageCategory(r, r._body);
+        if (r.filePath) pathKind.set(r.filePath, kind);
+        out[kind].count++;
+        try { out[kind].bytes += JSON.stringify(r).length; } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+    try {
+      await withStore(MEDIA_STORE, 'readonly', (s) => new Promise((resolve, reject) => {
+        const req = s.openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) { resolve(); return; }
+          const kind = pathKind.get(cur.key) || mediaKind(cur.value);
+          if (!pathKind.has(cur.key)) out[kind].count++;
+          out[kind].bytes += cur.value?.blob?.size || 0;
+          cur.continue();
+        };
+        req.onerror = () => reject(req.error);
+      }));
+    } catch { /* ignore */ }
+    return out;
+  },
+
+  /** Delete one bucket's messages and their files from this device. */
+  async clearCategory(kind) {
+    const pathKind = new Map();
+    try {
+      await withStore(MSG_STORE, 'readwrite', (s) => new Promise((resolve, reject) => {
+        const req = s.openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) { resolve(); return; }
+          const rowKind = messageCategory(cur.value, cur.value._body);
+          if (cur.value.filePath) pathKind.set(cur.value.filePath, rowKind);
+          if (rowKind === kind) cur.delete();
+          cur.continue();
+        };
+        req.onerror = () => reject(req.error);
+      }));
+    } catch { /* ignore */ }
+    try {
+      await withStore(MEDIA_STORE, 'readwrite', (s) => new Promise((resolve, reject) => {
+        const req = s.openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) { resolve(); return; }
+          if ((pathKind.get(cur.key) || mediaKind(cur.value)) === kind) cur.delete();
+          cur.continue();
+        };
+        req.onerror = () => reject(req.error);
+      }));
+    } catch { /* ignore */ }
   },
 
   async clear() {

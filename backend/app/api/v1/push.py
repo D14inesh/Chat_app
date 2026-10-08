@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.security import require_auth
 from app.core.config import VAPID_PUBLIC_KEY
-from app.core.database import query
+from app.core.database import one, query
 
 router = APIRouter(prefix="/api/push")
 
@@ -41,3 +41,24 @@ async def unsubscribe(request: Request, user_id: str = Depends(require_auth)):
     if endpoint:
         await query("DELETE FROM push_subscriptions WHERE endpoint = $1 AND user_id = $2", endpoint, user_id)
     return {"ok": True}
+
+
+@router.get("/settings")
+async def notification_settings(user_id: str = Depends(require_auth)):
+    row = await one("SELECT notify_messages, notify_calls FROM users WHERE id = $1", user_id)
+    return {"messages": row["notify_messages"], "calls": row["notify_calls"]}
+
+
+@router.patch("/settings")
+async def update_notification_settings(request: Request, user_id: str = Depends(require_auth)):
+    """Message / call notifications on or off — for every device of mine."""
+    body = await request.json()
+    row = await one(
+        """UPDATE users SET notify_messages = COALESCE($2, notify_messages),
+                            notify_calls = COALESCE($3, notify_calls)
+            WHERE id = $1 RETURNING notify_messages, notify_calls""",
+        user_id,
+        bool(body["messages"]) if "messages" in body else None,
+        bool(body["calls"]) if "calls" in body else None,
+    )
+    return {"messages": row["notify_messages"], "calls": row["notify_calls"]}

@@ -802,3 +802,118 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date date;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS private_lock boolean NOT NULL DEFAULT false;
 -- Archived chats leave the main list (per person) and stay archived, silently.
 ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
+
+-- Sign-in approval: devices each account has already used (sign in
+-- straight away) and requests from new ones (wait for the owner to accept
+-- from their Gmail or a signed-in device). See backend/app/utils/login_approval.py.
+CREATE TABLE IF NOT EXISTS trusted_devices (
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id  text NOT NULL,
+  label      text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, device_id)
+);
+-- Every device an account already signed in on counts as trusted.
+INSERT INTO trusted_devices (user_id, device_id, label)
+  SELECT user_id, device_id, label FROM device_bindings ON CONFLICT DO NOTHING;
+-- One account per device is for the phone app only; browsers are free.
+DELETE FROM device_bindings WHERE device_id LIKE 'web:%';
+
+CREATE TABLE IF NOT EXISTS login_approvals (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id   text NOT NULL,
+  label       text,
+  ip          text,
+  token_hash  text NOT NULL,
+  status      text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'used')),
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  decided_at  timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_login_approvals_token ON login_approvals(token_hash);
+CREATE INDEX IF NOT EXISTS idx_login_approvals_user ON login_approvals(user_id, created_at DESC);
+
+-- Notifications: each person can turn message / call notifications off.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_messages boolean NOT NULL DEFAULT true;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_calls boolean NOT NULL DEFAULT true;
+
+-- ── Signal protocol (X3DH + Double Ratchet) ───────────────────────────
+-- Each phone/browser is its own Signal device; only PUBLIC keys live here.
+-- See backend/app/api/v1/signal.py.
+CREATE TABLE IF NOT EXISTS signal_devices (
+  user_id           uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id         integer NOT NULL,
+  client_id         text NOT NULL,          -- utils/devices.py id of this phone/browser
+  registration_id   integer NOT NULL,
+  identity_key      text NOT NULL,
+  signed_prekey_id  integer NOT NULL,
+  signed_prekey     text NOT NULL,
+  signed_prekey_sig text NOT NULL,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  last_seen         timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, device_id),
+  UNIQUE (user_id, client_id)
+);
+-- Device numbers are never reused (a re-registered device gets a new one).
+CREATE TABLE IF NOT EXISTS signal_device_counters (
+  user_id   uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id integer NOT NULL,
+  PRIMARY KEY (user_id, device_id)
+);
+CREATE TABLE IF NOT EXISTS signal_prekeys (
+  user_id    uuid NOT NULL,
+  device_id  integer NOT NULL,
+  key_id     integer NOT NULL,
+  public_key text NOT NULL,
+  PRIMARY KEY (user_id, device_id, key_id),
+  FOREIGN KEY (user_id, device_id) REFERENCES signal_devices(user_id, device_id) ON DELETE CASCADE
+);
+-- One sealed copy of a Signal message per receiving device.
+-- kind: 3 = first message of a session (pre-key message), 1 = normal.
+CREATE TABLE IF NOT EXISTS message_envelopes (
+  message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    uuid NOT NULL,
+  device_id  integer NOT NULL,
+  kind       smallint NOT NULL,
+  body       text NOT NULL,
+  PRIMARY KEY (message_id, user_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_envelopes_device ON message_envelopes(user_id, device_id);
+
+-- Chat backup: one password-locked backup per account (WhatsApp-style).
+-- The file itself (storage/chat_backups/<user_id>.bin) is encrypted on the device
+-- with a key made from a backup password the server never sees.
+-- See backend/app/api/v1/backup.py.
+CREATE TABLE IF NOT EXISTS chat_backups (
+  user_id       uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  size          bigint NOT NULL,
+  message_count integer NOT NULL DEFAULT 0,
+  device        text NOT NULL DEFAULT '',
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- Privacy (Settings → Privacy on the phone): who sees my last seen / online
+-- and my profile photo ('everyone' | 'contacts' | 'nobody'), and read
+-- receipts. Read receipts off hides blue ticks in 1-to-1 chats both ways.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS read_receipts boolean NOT NULL DEFAULT true;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_privacy text NOT NULL DEFAULT 'everyone';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_privacy text NOT NULL DEFAULT 'everyone';
+-- Pinned chats (top of the list, up to 3) and "mute for 8 hours / 1 week".
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS pinned_at timestamptz;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS muted_until timestamptz;
+
+-- May `viewer` see `owner`'s last seen / photo under `setting`?
+-- 'contacts' = people with an accepted 1-to-1 chat together.
+CREATE OR REPLACE FUNCTION veyon_can_see(owner uuid, viewer uuid, setting text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN owner = viewer THEN true
+    WHEN setting = 'nobody' THEN false
+    WHEN setting = 'contacts' THEN EXISTS (
+      SELECT 1 FROM conversations c
+        JOIN conversation_members a ON a.conversation_id = c.id AND a.user_id = owner
+        JOIN conversation_members b ON b.conversation_id = c.id AND b.user_id = viewer
+       WHERE c.kind = 'direct' AND c.status = 'accepted')
+    ELSE true
+  END
+$$;

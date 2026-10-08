@@ -460,11 +460,40 @@ export async function decryptFileMeta(key, ciphertext, iv) {
 }
 
 export async function decryptFileBytes(key, arrayBuffer, blobIv) {
+  // A file sent over Signal carries its own one-time key: "k:<key>:<iv>"
+  // (inside the sealed message — the server never sees it). Older files use
+  // the chat's key.
+  if (typeof blobIv === 'string' && blobIv.startsWith('k:')) {
+    const [, rawKey, iv] = blobIv.split(':');
+    const fileKey = await crypto.subtle.importKey('raw', b64ToBuf(rawKey), 'AES-GCM', false, ['decrypt']);
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(b64ToBuf(iv)) }, fileKey, arrayBuffer);
+  }
   return crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: new Uint8Array(b64ToBuf(blobIv)) },
     key,
     arrayBuffer
   );
+}
+
+/**
+ * For the Signal protocol: a photo/video/voice note is locked with its own
+ * brand-new random key. That key (with the file's name and type) goes into
+ * the message, which Signal then seals per device — so the server only ever
+ * holds the locked file, never anything that opens it.
+ */
+export async function sealFileForSignal(file, extra = {}) {
+  const fileKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const blobCt = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, fileKey, await file.arrayBuffer());
+  const rawKey = await crypto.subtle.exportKey('raw', fileKey);
+  const meta = {
+    name: file.name,
+    mime: file.type || 'application/octet-stream',
+    size: file.size,
+    blobIv: `k:${bufToB64(rawKey)}:${bufToB64(iv)}`,
+    ...extra,
+  };
+  return { blob: new Blob([blobCt], { type: 'application/octet-stream' }), meta };
 }
 
 /**

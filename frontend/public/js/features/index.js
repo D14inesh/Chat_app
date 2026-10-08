@@ -22,6 +22,7 @@ export { openBroadcastsPanel } from './broadcasts.js';
 export { businessSectionHtml, wireBusinessSection, businessBlockFor } from './business.js';
 export { maybePlayEffect } from './effects.js';
 export { openFeatureSettings } from './settings.js';
+export { openBackupPanel, startBackupWatcher, forgetBackupHere } from './backup.js';
 export {
   startTicTacToe, applyTicTacToeMove, startSnakes, applySnakesMove,
 } from './games2.js';
@@ -31,6 +32,7 @@ import { onMessagePinned } from './pins.js';
 import { onDisappearingChanged } from './disappearing.js';
 import { onViewOnceOpened } from './viewonce.js';
 import { onLoginAlert } from './security.js';
+import { onLoginApproval } from './approval.js';
 import { onGroupFrame } from './groups.js';
 import { onPollClosed } from './polls.js';
 import { onCallLog } from './calls.js';
@@ -43,6 +45,7 @@ export function handleFeatureFrame(frame) {
     case 'disappearing-changed': onDisappearingChanged(frame); return true;
     case 'view-once-opened': onViewOnceOpened(frame); return true;
     case 'login-alert': onLoginAlert(frame); return true;
+    case 'login-approval': onLoginApproval(frame); return true;
     case 'poll-closed': onPollClosed(frame); return true;
     case 'call-log': onCallLog(frame); return true;
     default: return onGroupFrame(frame);
@@ -72,5 +75,7 @@ export {
   openAwaySettings, openChatNotes, priceText,
 } from './shop.js';
 export {
-  birthFieldHtml, ensureBirthDate, setPrivateLock, archiveFilter, archivedRowHtml, wireArchivedRow, toggleArchive, viewingArchived,
+  birthFieldHtml, privateChatGate, setPrivateLock, archiveFilter, archivedRowHtml, wireArchivedRow, toggleArchive, viewingArchived,
 } from './privacy.js';
+export { waitForApproval } from './approval.js';
+export { initPanels, openSettings } from './panels.js';

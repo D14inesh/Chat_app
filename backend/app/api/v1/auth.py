@@ -8,6 +8,7 @@ import asyncpg
 import bcrypt
 import jwt as pyjwt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.core.security import (
     bump_session_epoch, clear_session_cookie, require_auth, session_epoch,
@@ -18,7 +19,8 @@ from app.core.database import one, query
 from app.utils.devices import (
     bind_device, client_ip, device_id, device_label, device_owner, device_taken_message,
 )
-from app.utils.age import is_adult, parse_birth_date
+from app.utils import login_approval
+from app.utils.age import is_adult, optional_birth_date, parse_birth_date
 from app.utils.otp import check_code, ensure_contact_free, normalize_phone, read_contact, send_code
 from app.utils.serializers import shape_user
 
@@ -88,7 +90,7 @@ async def register(request: Request, response: Response):
         raise HTTPException(409, "That username is already taken.")
 
     # One account per mobile number and per email; the email code proves the Gmail.
-    birth = parse_birth_date(body.get("birthDate"))
+    birth = optional_birth_date(body.get("birthDate"))
     phone, email = read_contact(body)
     await ensure_contact_free(phone, email)
     await check_code(phone, email, "register", body.get("otp"))
@@ -109,6 +111,7 @@ async def register(request: Request, response: Response):
         raise HTTPException(409, "That username, mobile number or email was just taken.")
 
     await bind_device(dev, user["id"], device_label(request))
+    await login_approval.trust(user["id"], dev, device_label(request))
     set_session_cookie(response, sign_session(user["id"], await session_epoch(user["id"])), request)
     await record_login(user["id"], request, "register")
     return {"user": with_contact(shape_user(user), {"phone": phone, "email": email, "email_verified_at": True, "birth_date": birth})}
@@ -125,7 +128,7 @@ async def login(request: Request, response: Response):
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance,
                   password_hash, enc_private_key, phone, email, email_verified_at,
-                  enc_private_key_recovery, disabled_at, birth_date, private_lock
+                  enc_private_key_recovery, disabled_at, birth_date, private_lock, notify_messages, notify_calls
              FROM users WHERE username_lower = $1 OR phone = $2 OR lower(email) = $1
             ORDER BY (username_lower = $1) DESC LIMIT 1""",
         ident, normalize_phone(ident) or "",
@@ -145,13 +148,94 @@ async def login(request: Request, response: Response):
     owner = await device_owner(dev)
     if owner and str(owner["user_id"]) != str(row["id"]):
         raise HTTPException(403, device_taken_message(owner))
-    await bind_device(dev, row["id"], device_label(request))
 
+    # A device this account hasn't used before waits until the owner accepts
+    # it (email to their Gmail, or a device they're signed in on).
+    if await login_approval.needs_approval(row, dev):
+        pending = await login_approval.start(row, dev, request)
+        out = JSONResponse(status_code=202, content=pending)
+        for header in response.headers.getlist("set-cookie"):   # keep the device cookie
+            out.headers.append("set-cookie", header)
+        return out
+
+    return await finish_login(row, dev, request, response)
+
+
+async def finish_login(row: dict, dev: str | None, request: Request, response: Response, method: str = "password"):
+    await bind_device(dev, row["id"], device_label(request))
+    await login_approval.trust(row["id"], dev, device_label(request))
     await query("UPDATE users SET last_seen = now() WHERE id = $1", row["id"])
     set_session_cookie(response, sign_session(row["id"], await session_epoch(row["id"])), request)
-    await record_login(row["id"], request, "password")
-
+    await record_login(row["id"], request, method)
     return {"user": with_contact(shape_user(row), row), "encPrivateKey": row["enc_private_key"]}
+
+
+_LOGIN_ROW = """SELECT id, username, display_name, avatar_color, about, photo_path, appearance,
+                  password_hash, enc_private_key, phone, email, email_verified_at,
+                  enc_private_key_recovery, disabled_at, birth_date, private_lock, notify_messages, notify_calls
+             FROM users WHERE id = $1"""
+
+
+@router.post("/login/pending")
+async def login_pending(request: Request, response: Response):
+    """The waiting device asks: has my sign-in been accepted yet?"""
+    approval_id = str((await request.json()).get("approvalId") or "")
+    dev = device_id(request)
+    row = await one("SELECT * FROM login_approvals WHERE id::text = $1 AND device_id = $2", approval_id, dev or "")
+    if not row:
+        raise HTTPException(404, "That sign-in request wasn't found — sign in again.")
+    if row["status"] == "rejected":
+        raise HTTPException(403, "Your sign-in was rejected from the account's Gmail or another device.")
+    if row["status"] == "used":
+        raise HTTPException(410, "That sign-in request was already used — sign in again.")
+    if row["status"] == "pending":
+        fresh = await login_approval.find_open("id = $1", row["id"])
+        if not fresh:
+            raise HTTPException(410, "The sign-in request expired — sign in again.")
+        return {"pending": True}
+    # Approved: finish signing in on this device, once.
+    await query("UPDATE login_approvals SET status = 'used' WHERE id = $1", row["id"])
+    user = await one(_LOGIN_ROW, row["user_id"])
+    if not user or user["disabled_at"]:
+        raise HTTPException(403, "This account can't sign in right now.")
+    return await finish_login(user, dev, request, response, "approved")
+
+
+@router.get("/login-approval", response_class=HTMLResponse)
+async def login_approval_link(token: str = "", action: str = ""):
+    """The Accept / Reject links in the email."""
+    from app.utils.login_approval import _hash
+
+    row = await login_approval.find_open("token_hash = $1", _hash(token)) if token else None
+    if not row:
+        return login_approval.page("Link expired", "This sign-in request was already answered or has expired.", False)
+    approve = action == "approve"
+    await login_approval.decide(row, approve)
+    if approve:
+        return login_approval.page("Sign-in accepted", f"{row['label'] or 'The device'} can now finish signing in.", True)
+    return login_approval.page("Sign-in rejected",
+                               "That device was not let in. If it wasn't you, change your password soon.", False)
+
+
+@router.get("/login-approvals")
+async def my_pending_approvals(uid: str = Depends(require_auth)):
+    """Sign-in requests still waiting — for a phone that was closed when they came."""
+    return {"approvals": await login_approval.pending_for(uid)}
+
+
+@router.post("/login-approval/{approval_id}")
+async def login_approval_in_app(approval_id: str, request: Request, uid: str = Depends(require_auth)):
+    """Accept / Reject from a device that's already signed in."""
+    approve = (await request.json()).get("action") == "approve"
+    row = await one(
+        """SELECT * FROM login_approvals WHERE id::text = $1 AND user_id = $2 AND status = 'pending'
+              AND created_at > now() - interval '10 minutes'""",
+        approval_id, uid,
+    )
+    if not row:
+        raise HTTPException(404, "That sign-in request was already answered or has expired.")
+    await login_approval.decide(row, approve)
+    return {"ok": True, "approved": approve}
 
 
 def with_contact(user: dict, row: dict) -> dict:
@@ -166,11 +250,18 @@ def with_contact(user: dict, row: dict) -> dict:
     # 1-to-1 chats and calls are for 18+ (see utils/age.py).
     user["isAdult"] = is_adult(birth)
     user["privateLock"] = bool(row.get("private_lock"))
+    user["notifyMessages"] = row.get("notify_messages") is not False
+    user["notifyCalls"] = row.get("notify_calls") is not False
     return user
 
 
 @router.post("/logout")
 async def logout(request: Request, response: Response):
+    from app.api.v1.signal import forget_device
+    from app.core.security import verify_session_live, COOKIE_NAME
+    live = await verify_session_live(request.cookies.get(COOKIE_NAME))
+    if live:
+        await forget_device(live[0], device_id(request))   # this device's Signal keys go with it
     clear_session_cookie(response, request)
     return {"ok": True}
 
@@ -180,7 +271,7 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
     row = await one(
         """SELECT id, username, display_name, avatar_color, about, photo_path, appearance, enc_private_key, business,
                   phone, email, email_verified_at, enc_private_key_recovery, disabled_at,
-                  birth_date, private_lock
+                  birth_date, private_lock, notify_messages, notify_calls
              FROM users WHERE id = $1""",
         uid,
     )
@@ -198,6 +289,7 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
         clear_session_cookie(response, request)
         raise HTTPException(401, device_taken_message(owner))
     await bind_device(dev, uid, device_label(request))
+    await login_approval.trust(uid, dev, device_label(request))
 
     user = shape_user(row)
     user["businessSettings"] = row["business"] or {}
@@ -212,7 +304,7 @@ async def get_me(request: Request, response: Response, uid: str = Depends(requir
 
 @router.post("/birth-date")
 async def set_birth_date(request: Request, uid: str = Depends(require_auth)):
-    """Accounts made before the age rule add their date of birth — once."""
+    """Added the first time someone opens a private chat — once."""
     birth = parse_birth_date((await request.json()).get("birthDate"))
     row = await one(
         "UPDATE users SET birth_date = $2 WHERE id = $1 AND birth_date IS NULL RETURNING birth_date", uid, birth,
@@ -363,6 +455,8 @@ async def release_device(request: Request, response: Response, uid: str = Depend
     dev = device_id(request)
     if dev:
         await query("DELETE FROM device_bindings WHERE device_id = $1 AND user_id = $2", dev, uid)
+        from app.api.v1.signal import forget_device
+        await forget_device(uid, dev)
     clear_session_cookie(response, request)
     return {"ok": True}
 
@@ -402,6 +496,9 @@ async def logout_others(request: Request, response: Response, background: Backgr
 
     new_epoch = await bump_session_epoch(uid)
     set_session_cookie(response, sign_session(uid, new_epoch), request)
+    # The signed-out devices' Signal keys leave the directory too.
+    await query("DELETE FROM signal_devices WHERE user_id = $1 AND client_id IS DISTINCT FROM $2",
+                uid, device_id(request) or "")
 
     async def close_later():
         await asyncio.sleep(0.5)

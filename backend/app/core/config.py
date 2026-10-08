@@ -20,6 +20,8 @@ UPLOAD_DIR = STORAGE_DIR / "uploads"
 # Plain, directly-viewable profile photos.
 AVATAR_DIR = STORAGE_DIR / "avatars"
 WALLPAPER_DIR = STORAGE_DIR / "wallpapers"
+# Password-locked chat backups (one file per account), already encrypted on the device.
+CHAT_BACKUP_DIR = STORAGE_DIR / "chat_backups"
 
 # The frontend is served separately, so the browser calls this API
 # cross-origin. List every origin the frontend is opened from, comma-separated:
@@ -37,6 +39,15 @@ if COOKIE_SAMESITE not in ("lax", "strict", "none"):
     COOKIE_SAMESITE = "lax"
 
 PORT = int(os.environ.get("PORT", "4000"))
+
+# Server layout: Users → Nginx → API workers → Redis → PostgreSQL.
+# REDIS_URL lets several API workers act as one (who's online, delivering a
+# message to a friend connected to another worker, ...). Empty = a single
+# worker keeps all of that in its own memory (fine for local development).
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+# Behind Nginx: listen on 127.0.0.1 only (Nginx is the only way in, and it
+# does HTTPS), and trust its X-Forwarded-For / X-Forwarded-Proto headers.
+BEHIND_PROXY = os.environ.get("BEHIND_PROXY", "").strip().lower() in ("1", "true", "yes")
 # LAN/phone access needs HTTPS — WebCrypto (crypto.subtle) only runs in a
 # browser "secure context" on https:// or literal localhost, not a plain
 # http:// LAN IP. See backend/certs/.
@@ -90,6 +101,10 @@ SMTP_PASS = os.environ.get("SMTP_PASS", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", "") or SMTP_USER
 # Local testing without email: the code is returned to the app and shown
 # on screen. Never turn this on for the real server.
+# Where links in emails (sign-in approval) point, e.g. https://chat.example.com:4843.
+# Empty = the API address the signing-in device used.
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").strip()
+
 OTP_DEV_MODE = os.environ.get("OTP_DEV_MODE", "").strip().lower() in ("1", "true", "yes")
 
 # Daily database backups (pg_dump custom format), made by the backend itself

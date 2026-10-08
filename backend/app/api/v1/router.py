@@ -6,14 +6,14 @@ already calls.
 from fastapi import APIRouter
 
 from app.api.v1 import (
-    ai, auth, business_tools, calls, chat_extras, groups, broadcasts, conversations, gif, labels, link, messages, push, quick_replies,
-    reminders, scheduled, status, upload, users, voice,
+    ai, auth, backup, business_tools, calls, chat_extras, groups, broadcasts, conversations, gif, labels, link, messages, push, quick_replies,
+    reminders, scheduled, signal, status, upload, users, voice,
 )
 
 api_router = APIRouter()
 
 for module in (
     auth, users, conversations, upload, status, ai, voice, reminders, push,
-    scheduled, messages, labels, link, gif, quick_replies, broadcasts, groups, chat_extras, calls, business_tools,
+    scheduled, messages, labels, link, gif, quick_replies, broadcasts, groups, chat_extras, calls, business_tools, signal, backup,
 ):
     api_router.include_router(module.router)

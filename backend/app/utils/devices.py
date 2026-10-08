@@ -71,9 +71,15 @@ def device_id(request: Request, response=None) -> str | None:
     return new_id
 
 
+def is_phone(dev: str | None) -> bool:
+    """The phone app sends its own device id; browsers get a "web:" cookie."""
+    return bool(dev) and not dev.startswith("web:")
+
+
 async def device_owner(dev: str | None) -> dict | None:
-    """{user_id, username, display_name} owning this device, or None."""
-    if not dev:
+    """{user_id, username, display_name} owning this phone, or None.
+    One account per device is for the phone app only — browsers are free."""
+    if not is_phone(dev):
         return None
     from app.core.database import one
 
@@ -91,7 +97,7 @@ def device_taken_message(owner: dict) -> str:
 
 
 async def bind_device(dev: str | None, user_id: str, label: str):
-    if not dev:
+    if not is_phone(dev):
         return
     from app.core.database import query
 

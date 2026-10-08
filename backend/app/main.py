@@ -1,5 +1,9 @@
 """API + WebSocket server. The frontend is served separately (../frontend).
 
+On the server: Users → Nginx → several of these workers → Redis → PostgreSQL
+(see deploy/README.md). Each worker is one `python run.py` with its own PORT,
+BEHIND_PROXY=1 and the shared REDIS_URL.
+
 Run from the backend/ folder with:
   python run.py                         (HTTP :4000 + HTTPS :4443 when certs/ exist)
   uvicorn app.main:app --port 4000      (single plain listener, handy for local testing)
@@ -15,8 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
+from app.core import bus
 from app.core import database as db
-from app.core.config import CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_PORT, PORT, PROJECT_DIR, UPLOAD_DIR
+from app.core.config import (BEHIND_PROXY, CERT_DIR, CORS_ORIGIN_REGEX, CORS_ORIGINS, HTTPS_PORT, PORT, PROJECT_DIR,
+                             UPLOAD_DIR)
 from app.core.database import close_pool, init_pool
 from app.schedulers.reminders_scheduler import run_reminder_scheduler
 from app.schedulers.scheduled_messages_scheduler import run_scheduled_messages_poller
@@ -111,25 +117,41 @@ async def lifespan(app: FastAPI):
             "  then create the schema with:  python setup_db.py"
         ) from err
 
-    try:
-        await _schema_top_up()
-    except Exception as err:  # noqa: BLE001
-        print(f"[migrate] schema top-up failed: {err!r}")
-    try:
-        await _apply_schema_file()
-    except Exception as err:  # noqa: BLE001
-        print(f"[migrate] schema.sql failed: {err!r}")
+    # Workers start together: one at a time through the schema (Postgres
+    # advisory lock), so two don't run the same ALTER TABLE at once.
+    async with db.pool.acquire() as conn:
+        await conn.execute("SELECT pg_advisory_lock(727001)")
+        try:
+            try:
+                await _schema_top_up()
+            except Exception as err:  # noqa: BLE001
+                print(f"[migrate] schema top-up failed: {err!r}")
+            try:
+                await _apply_schema_file()
+            except Exception as err:  # noqa: BLE001
+                print(f"[migrate] schema.sql failed: {err!r}")
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(727001)")
 
-    _background_tasks.append(asyncio.create_task(run_reminder_scheduler()))
-    _background_tasks.append(asyncio.create_task(run_scheduled_messages_poller()))
-    _background_tasks.append(asyncio.create_task(_status_sweep_loop()))
-    _background_tasks.append(asyncio.create_task(_expiry_sweep_loop()))
-    _background_tasks.append(asyncio.create_task(run_daily_backups()))
+    await bus.start()
+
+    def start_jobs() -> list[asyncio.Task]:
+        jobs = [asyncio.create_task(c) for c in (
+            run_reminder_scheduler(), run_scheduled_messages_poller(), _status_sweep_loop(),
+            _expiry_sweep_loop(), run_daily_backups(),
+        )]
+        _background_tasks.extend(jobs)
+        return jobs
+
+    # Backups, scheduled messages and clean-ups run on ONE worker only.
+    leader = asyncio.create_task(bus.run_as_leader(start_jobs))
 
     yield
 
+    leader.cancel()
     for t in _background_tasks:
         t.cancel()
+    await bus.stop()
     await close_pool()
 
 
@@ -170,8 +192,21 @@ async def root():
 
 
 @app.get("/api/presence")
-async def presence():
-    return {"online": hub.online_user_ids()}
+async def presence(request: Request):
+    """Who's online — only people whose Privacy lets me see it."""
+    from app.core.security import require_auth
+    online = await hub.online_user_ids()
+    try:
+        viewer = await require_auth(request, request.cookies.get("vesper_session"))
+    except Exception:  # noqa: BLE001 — signed out: nobody
+        return {"online": []}
+    if not online:
+        return {"online": []}
+    rows = await db.pool.fetch(
+        "SELECT id FROM users WHERE id = ANY($1::uuid[]) AND veyon_can_see(id, $2::uuid, last_seen_privacy)",
+        online, viewer,
+    )
+    return {"online": [str(r["id"]) for r in rows]}
 
 
 @app.get("/api/health")
@@ -179,7 +214,7 @@ async def health():
     try:
         async with db.pool.acquire() as conn:
             await conn.execute("SELECT 1")
-        return {"ok": True}
+        return {"ok": True, **await bus.status()}
     except Exception as err:  # noqa: BLE001
         return JSONResponse(status_code=503, content={"ok": False, "error": str(err)})
 
@@ -207,6 +242,15 @@ async def run_dual_listener():
 
     cert_path = CERT_DIR / "cert.pem"
     key_path = CERT_DIR / "key.pem"
+
+    if BEHIND_PROXY:
+        # Nginx is the front door (and does HTTPS): only it may connect, and
+        # its X-Forwarded-* headers carry the real client IP and https.
+        config = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="info",
+                                proxy_headers=True, forwarded_allow_ips="127.0.0.1")
+        print(f"\n  API worker on 127.0.0.1:{PORT} (behind Nginx)\n")
+        await uvicorn.Server(config).serve()
+        return
 
     http_config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
     servers = [uvicorn.Server(http_config)]

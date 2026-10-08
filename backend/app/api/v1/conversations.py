@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.core.security import require_auth
 from app.core.config import WALLPAPER_DIR
 from app.core.database import are_accepted_contacts, execute, is_blocked_either_way, one, query, row_count, transaction
+from app.utils import privacy
 from app.utils.age import require_direct_allowed
 from app.utils.serializers import shape_conversation, shape_message
 from app.websocket import manager as hub
@@ -64,12 +65,15 @@ async def list_conversations(user_id: str = Depends(require_auth)):
     rows = await query(
         """WITH mine AS (
              SELECT conversation_id, favorite, wallpaper, wallpaper_photo_path, wallpaper_fit,
-                    muted, cleared_at, hidden_at, role, locked, archived
+                    muted, muted_until, pinned_at, cleared_at, hidden_at, role, locked, archived
                FROM conversation_members WHERE user_id = $1
            ),
            peer AS (
              SELECT cm.conversation_id, u.id, u.username, u.display_name,
-                    u.avatar_color, u.about, u.photo_path, u.last_seen, u.public_key
+                    u.avatar_color, u.about, u.public_key, u.read_receipts,
+                    -- Their privacy settings decide whether I see these.
+                    CASE WHEN veyon_can_see(u.id, $1, u.photo_privacy) THEN u.photo_path END AS photo_path,
+                    CASE WHEN veyon_can_see(u.id, $1, u.last_seen_privacy) THEN u.last_seen END AS last_seen
                FROM conversation_members cm
                JOIN conversations c ON c.id = cm.conversation_id AND c.kind = 'direct'
                JOIN users u ON u.id = cm.user_id
@@ -122,7 +126,13 @@ async def list_conversations(user_id: str = Depends(require_auth)):
                   lm.iv AS last_iv, lm.created_at AS last_at,
                   lm.delivered_at AS last_delivered, lm.read_at AS last_read, lm.view_once AS last_view_once,
                   COALESCE(un.n, 0) AS unread,
-                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.muted, mm.archived,
+                  mm.favorite, mm.wallpaper, mm.wallpaper_photo_path, mm.wallpaper_fit, mm.archived,
+                  -- "Mute for 8 hours / 1 week" ends by itself.
+                  (mm.muted AND (mm.muted_until IS NULL OR mm.muted_until > now())) AS muted,
+                  CASE WHEN mm.muted AND mm.muted_until > now() THEN mm.muted_until END AS muted_until,
+                  mm.pinned_at,
+                  p.read_receipts AS peer_receipts,
+                  (SELECT read_receipts FROM users WHERE id = $1) AS my_receipts,
                   -- "Private chats PIN" puts every 1-to-1 chat behind the chat lock.
                   (mm.locked OR (c.kind = 'direct' AND (SELECT private_lock FROM users WHERE id = $1))) AS locked
              FROM conversations c
@@ -133,8 +143,10 @@ async def list_conversations(user_id: str = Depends(require_auth)):
              LEFT JOIN unread un     ON un.conversation_id = c.id
             WHERE c.id IN (SELECT conversation_id FROM mine)
               AND (mm.hidden_at IS NULL OR lm.created_at > mm.hidden_at)
-              -- Under-18s (or no date of birth yet) don't see 1-to-1 chats.
-              AND (c.kind <> 'direct' OR (SELECT birth_date <= (current_date - interval '18 years') FROM users WHERE id = $1))
+              -- Under-18s don't see private chats. No date of birth yet: they
+              -- show, and opening one asks for it (the server still checks).
+              AND (c.kind <> 'direct' OR (SELECT birth_date IS NULL OR birth_date <= (current_date - interval '18 years')
+                                          FROM users WHERE id = $1))
             ORDER BY COALESCE(lm.created_at, c.created_at) DESC""",
         user_id,
     )
@@ -152,6 +164,9 @@ async def list_conversations(user_id: str = Depends(require_auth)):
         ):
             pinned[m["id"]] = shape_message(m)
     for r in rows:
+        # Read receipts off (either person) -> no blue ticks in a 1-to-1 chat.
+        if r["kind"] == "direct" and not (r.get("my_receipts") and r.get("peer_receipts") is not False):
+            r["last_read"] = None
         r["pinned_message"] = pinned.get(r.get("pinned_message_id"))
         if not r["pinned_message"]:
             r["pinned_by"] = None
@@ -166,8 +181,11 @@ async def open_direct(request: Request, user_id: str = Depends(require_auth)):
         raise HTTPException(400, "Pick someone else to chat with.")
 
     peer = await one(
-        "SELECT id, username, display_name, avatar_color, about, photo_path, last_seen, public_key FROM users WHERE id = $1",
-        peer_id,
+        f"""SELECT id, username, display_name, avatar_color, about, public_key,
+                   {privacy.photo_sql('users', '$2')} AS photo_path,
+                   {privacy.last_seen_sql('users', '$2')} AS last_seen
+              FROM users WHERE id = $1""",
+        peer_id, user_id,
     )
     if not peer:
         raise HTTPException(404, "No such user.")
@@ -362,12 +380,13 @@ async def list_members(conversation_id: str, user_id: str = Depends(require_auth
         raise HTTPException(403, "Not your conversation.")
 
     rows = await query(
-        """SELECT u.id, u.username, u.display_name, u.avatar_color, u.photo_path, u.public_key, cm.role
+        f"""SELECT u.id, u.username, u.display_name, u.avatar_color, u.public_key, cm.role,
+                   {privacy.photo_sql('u', '$2')} AS photo_path
              FROM conversation_members cm
              JOIN users u ON u.id = cm.user_id
             WHERE cm.conversation_id = $1
             ORDER BY (cm.role = 'owner') DESC, (cm.role = 'admin') DESC, u.display_name""",
-        conversation_id,
+        conversation_id, user_id,
     )
     return {"members": [{
         "id": r["id"], "username": r["username"], "displayName": r["display_name"],
@@ -404,15 +423,47 @@ async def set_archived(conversation_id: str, request: Request, user_id: str = De
 
 @router.patch("/{conversation_id}/mute")
 async def set_muted(conversation_id: str, request: Request, user_id: str = Depends(require_auth)):
+    """{muted, hours?}: hours (8, 168...) mutes for that long; none = always."""
     body = await request.json()
     muted = bool(body.get("muted"))
-    status = await execute(
-        "UPDATE conversation_members SET muted = $1 WHERE conversation_id = $2 AND user_id = $3",
-        muted, conversation_id, user_id,
+    hours = body.get("hours")
+    hours = float(hours) if muted and isinstance(hours, (int, float)) and 0 < hours <= 24 * 366 else None
+    row = await one(
+        """UPDATE conversation_members
+              SET muted = $1, muted_until = CASE WHEN $4::float8 IS NULL THEN NULL
+                                                ELSE now() + make_interval(secs => $4::float8 * 3600) END
+            WHERE conversation_id = $2 AND user_id = $3
+            RETURNING muted_until""",
+        muted, conversation_id, user_id, hours,
     )
-    if not row_count(status):
+    if not row:
         raise HTTPException(403, "Not your conversation.")
-    return {"muted": muted}
+    return {"muted": muted, "mutedUntil": row["muted_until"]}
+
+
+MAX_PINNED = 3
+
+
+@router.patch("/{conversation_id}/pin")
+async def set_pinned(conversation_id: str, request: Request, user_id: str = Depends(require_auth)):
+    """Pin a chat to the top of my list (up to 3), or unpin it."""
+    pinned = bool((await request.json()).get("pinned"))
+    if pinned:
+        count = await one(
+            """SELECT count(*)::int AS n FROM conversation_members
+                WHERE user_id = $1 AND pinned_at IS NOT NULL AND conversation_id <> $2""",
+            user_id, conversation_id,
+        )
+        if count["n"] >= MAX_PINNED:
+            raise HTTPException(400, f"You can pin up to {MAX_PINNED} chats.")
+    row = await one(
+        """UPDATE conversation_members SET pinned_at = CASE WHEN $3 THEN COALESCE(pinned_at, now()) END
+            WHERE conversation_id = $1 AND user_id = $2 RETURNING pinned_at""",
+        conversation_id, user_id, pinned,
+    )
+    if not row:
+        raise HTTPException(403, "Not your conversation.")
+    return {"pinnedAt": row["pinned_at"]}
 
 
 @router.post("/{conversation_id}/clear")
@@ -530,7 +581,8 @@ async def get_group_key(conversation_id: str, user_id: str = Depends(require_aut
 
 
 @router.get("/{conversation_id}/messages")
-async def list_messages(conversation_id: str, before: str | None = None, user_id: str = Depends(require_auth)):
+async def list_messages(request: Request, conversation_id: str, before: str | None = None,
+                        user_id: str = Depends(require_auth)):
     member = await one(
         "SELECT cleared_at FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
         conversation_id, user_id,
@@ -561,8 +613,21 @@ async def list_messages(conversation_id: str, before: str | None = None, user_id
 
     reactions, votes, opens = await message_extras([r["id"] for r in rows])
 
+    # Signal messages: only this device's sealed copy goes back.
+    from app.api.v1.signal import my_signal_device
+    from app.utils import signal_envelopes as sig
+    from app.utils.devices import device_id
+    signal_ids = [r["id"] for r in rows if sig.is_signal(r["ciphertext"])]
+    sealed = await sig.for_device(signal_ids, user_id, await my_signal_device(user_id, device_id(request))) if signal_ids else {}
+
     rows.reverse()  # query pulls newest-first for LIMIT; the UI wants oldest-first
-    return {"messages": [
-        shape_message(r, reactions.get(r["id"], []), votes.get(r["id"], []), opens.get(r["id"], []))
-        for r in rows
-    ]}
+    hide_reads = await privacy.reads_hidden(conversation_id)
+    out = []
+    for r in rows:
+        m = shape_message(r, reactions.get(r["id"], []), votes.get(r["id"], []), opens.get(r["id"], []))
+        if hide_reads:
+            m["readAt"] = None
+        if sig.is_signal(r["ciphertext"]):
+            m["envelope"] = sealed.get(r["id"])
+        out.append(m)
+    return {"messages": out}

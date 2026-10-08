@@ -6,11 +6,10 @@ with the chat's key (the apps decrypt it), visible to the chat's members.
 Chat lock: one PIN per account (bcrypt-hashed here) hides chats behind a
 "Locked chats" folder on every device. Which chats are locked is per
 person, like muting."""
-import time
-
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.core import bus
 from app.core.database import execute, one, query
 from app.core.security import require_auth
 
@@ -18,7 +17,6 @@ router = APIRouter()
 
 MAX_TRIES = 5
 WINDOW_S = 300
-_tries: dict[str, list[float]] = {}
 
 
 # ── Edit history ─────────────────────────────────────────────
@@ -52,19 +50,17 @@ def _valid_pin(pin) -> str:
 
 
 async def _check_pin(user_id: str, pin) -> None:
-    now = time.time()
-    recent = [t for t in _tries.get(user_id, []) if now - t < WINDOW_S]
-    if len(recent) >= MAX_TRIES:
+    # Counted in Redis, so every API worker shares the same 5 tries.
+    key = f"chat-pin:{user_id}"
+    if await bus.hits(key) >= MAX_TRIES:
         raise HTTPException(429, "Too many wrong PINs — try again in a few minutes.")
     row = await one("SELECT chat_lock_pin_hash FROM users WHERE id = $1", user_id)
     if not row or not row["chat_lock_pin_hash"]:
         raise HTTPException(400, "Set a chat lock PIN first.")
     if not bcrypt.checkpw(str(pin or "").encode(), row["chat_lock_pin_hash"].encode()):
-        recent.append(now)
-        _tries[user_id] = recent
-        left = MAX_TRIES - len(recent)
-        raise HTTPException(403, f"Wrong PIN. {left} tr{'y' if left == 1 else 'ies'} left." if left else "Wrong PIN.")
-    _tries.pop(user_id, None)
+        left = MAX_TRIES - await bus.hit(key, WINDOW_S)
+        raise HTTPException(403, f"Wrong PIN. {left} tr{'y' if left == 1 else 'ies'} left." if left > 0 else "Wrong PIN.")
+    await bus.clear(key)
 
 
 @router.get("/api/chat-lock")

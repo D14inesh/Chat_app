@@ -147,6 +147,12 @@ docker run -d --name chat-frontend -p 8080:80 -p 8443:443 `
 Port and path variables go in a `.env` next to the `docker-compose.yml`. For the
 backend, that's the same `backend/.env`.
 
+## The server (Windows)
+
+`scripts\setup-server.ps1` sets up Users → Nginx → API workers → Redis →
+PostgreSQL on one machine; `scripts\update-server.ps1` updates it. What runs
+where, logs and limits: [deploy/README.md](deploy/README.md).
+
 ## Deploying separately
 
 - **Frontend:** upload `frontend/public/` to any static host (nginx, IIS,

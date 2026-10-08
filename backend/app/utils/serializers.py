@@ -20,6 +20,10 @@ def shape_conversation(r: dict) -> dict:
         ),
         "wallpaperFit": r.get("wallpaper_fit") or "cover",
         "muted": bool(r.get("muted")),
+        # Muted for a while ("8 hours", "1 week"); null = always / not muted.
+        "mutedUntil": r.get("muted_until"),
+        # Pinned to the top of my chat list (up to 3).
+        "pinnedAt": r.get("pinned_at"),
         # Hidden behind my chat-lock PIN (per person, like muted).
         "locked": bool(r.get("locked")),
         "archived": bool(r.get("archived")),

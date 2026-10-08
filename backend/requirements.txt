@@ -9,3 +9,4 @@ pillow==11.1.0
 pywebpush==2.0.3
 httpx==0.28.1
 python-dotenv==1.0.1
+redis==8.1.0

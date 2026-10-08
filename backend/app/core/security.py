@@ -49,9 +49,15 @@ def verify_session(token: str | None) -> str | None:
 
 
 # "Log out all other devices" bumps users.session_epoch; tokens carrying an
-# older epoch are refused. Cached per user so a request doesn't cost a query
-# (this process is the only writer of the column — see bump_session_epoch).
+# older epoch are refused. Cached per user so a request doesn't cost a query;
+# a bump is announced to every API worker (see bus "epoch" events) so none
+# keeps accepting a signed-out token from its cache.
 _epoch_cache: dict[str, int] = {}
+
+
+def set_cached_epoch(user_id: str, epoch: int):
+    if epoch > _epoch_cache.get(user_id, -1):
+        _epoch_cache[user_id] = epoch
 
 
 async def session_epoch(user_id: str) -> int:
@@ -66,6 +72,8 @@ async def bump_session_epoch(user_id: str) -> int:
     from app.core.database import one
     row = await one("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = $1 RETURNING session_epoch", user_id)
     _epoch_cache[user_id] = row["session_epoch"]
+    from app.core import bus
+    await bus.publish({"t": "epoch", "u": str(user_id), "epoch": row["session_epoch"]})
     return row["session_epoch"]
 
 

@@ -4,11 +4,14 @@
   "description": "Veyon Chat website styles (Tailwind build)",
   "scripts": {
     "build:css": "tailwindcss -i styles/ui.css -o public/css/ui.css --minify",
-    "watch:css": "tailwindcss -i styles/ui.css -o public/css/ui.css --watch"
+    "watch:css": "tailwindcss -i styles/ui.css -o public/css/ui.css --watch",
+    "build:signal": "esbuild styles/libsignal-entry.js --bundle --format=esm --minify --target=es2020 --platform=browser --outfile=public/js/vendor/libsignal.js"
   },
   "type": "module",
   "devDependencies": {
+    "@privacyresearch/libsignal-protocol-typescript": "^0.0.16",
     "@tailwindcss/cli": "^4.3.3",
+    "esbuild": "^0.25.12",
     "tailwindcss": "^4.3.3"
   },
   "private": true

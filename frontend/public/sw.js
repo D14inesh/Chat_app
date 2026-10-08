@@ -15,11 +15,11 @@
 const CACHE_NAME = 'veyon-chat-shell-v13';
 const FEATURE_MODULES = [
   'core', 'index', 'polls', 'pins', 'disappearing', 'viewonce', 'drafts', 'export', 'ai-tools',
-  'security', 'quickreplies', 'broadcasts', 'business', 'effects', 'settings', 'games2', 'contact', 'recovery', 'groups', 'chat3', 'calls', 'shop', 'privacy',
+  'security', 'quickreplies', 'broadcasts', 'business', 'effects', 'settings', 'games2', 'contact', 'recovery', 'groups', 'chat3', 'calls', 'shop', 'privacy', 'approval', 'panels',
 ].map((name) => `/js/features/${name}.js`);
 const SHELL_ASSETS = [
   '/', '/config.js', '/css/theme.css', '/css/features.css', '/css/ui.css',
-  '/js/app.js', '/js/crypto.js', '/js/localstore.js', '/manifest.json',
+  '/js/app.js', '/js/crypto.js', '/js/localstore.js', '/js/signal.js', '/js/vendor/libsignal.js', '/manifest.json',
   ...FEATURE_MODULES,
 ];
 
@@ -77,7 +77,9 @@ self.addEventListener('push', (event) => {
     // One notification per reminder replaces itself instead of stacking if
     // delivery is ever retried (e.g. the scheduler's next tick overlaps a
     // slow push) — same reminderId always collapses to the same tag.
-    tag: data.reminderId ? `reminder-${data.reminderId}` : undefined,
+    tag: data.tag || (data.reminderId ? `reminder-${data.reminderId}` : undefined),
+    renotify: !!data.tag,                       // a new message in the same chat still alerts
+    requireInteraction: !!data.requireInteraction,   // incoming calls stay until answered/dismissed
     data,
   };
 
@@ -88,12 +90,17 @@ self.addEventListener('push', (event) => {
 // rather than always spawning a new one.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const conversationId = event.notification.data?.conversationId;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if ('focus' in client) return client.focus();
+        if ('focus' in client) {
+          // An open tab: bring it forward and open the chat the notification was about.
+          if (conversationId) client.postMessage({ type: 'open-chat', conversationId });
+          return client.focus();
+        }
       }
-      if (self.clients.openWindow) return self.clients.openWindow('/');
+      if (self.clients.openWindow) return self.clients.openWindow(conversationId ? `/#chat=${conversationId}` : '/');
       return undefined;
     })
   );

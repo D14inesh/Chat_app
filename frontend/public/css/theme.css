@@ -4085,6 +4085,19 @@ button { cursor: pointer; border: none; background: none; }
   font-size: 14px;
 }
 .storage-stat b { font-variant-numeric: tabular-nums; }
+.storage-kind span { display: flex; flex-direction: column; gap: 2px; }
+.storage-kind small { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.storage-clear-one {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--danger-text);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.storage-clear-one:hover:not(:disabled) { background: var(--danger-bg); }
+.storage-clear-one:disabled { opacity: 0.4; cursor: default; }
 
 /* ═══════════════════════════════════════════════════════════
    Linked devices
@@ -4514,3 +4527,46 @@ body::after {
   animation-timing-function: var(--ease-glide);
 }
 .chat-item, .icon-btn, .badge, .bubble { animation-timing-function: var(--ease-glide); }
+
+/* Chat backup (features/backup.js) */
+.backup-status {
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--hover-bg);
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.backup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+.backup-row select {
+  background: var(--hover-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font: inherit;
+}
+.backup-actions { flex-wrap: wrap; justify-content: flex-start; }
+
+/* Storage & data → Automatic download */
+.storage-subhead { margin: 20px 0 4px; font-size: 14px; font-weight: 700; }
+.storage-auto {
+  background: var(--hover-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+/* A photo / video shown inline instead of the file row */
+.attach.attach-media { padding: 0; background: none; display: block; }
+.attach-video { max-width: 100%; max-height: 340px; border-radius: 10px; display: block; }

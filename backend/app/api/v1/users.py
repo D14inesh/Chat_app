@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.core.security import require_auth
 from app.core.config import AVATAR_DIR
 from app.core.database import execute, one, query, row_count
+from app.utils import privacy
 from app.utils.serializers import shape_business, shape_user
 
 router = APIRouter(prefix="/api/users", dependencies=[Depends(require_auth)])
@@ -39,7 +40,9 @@ async def search_users(q: str = "", user_id: str = Depends(require_auth)):
     if len(q) < 1:
         return {"users": []}
     rows = await query(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, last_seen, public_key
+        f"""SELECT id, username, display_name, avatar_color, about, public_key,
+                   {privacy.photo_sql('users', '$1')} AS photo_path,
+                   {privacy.last_seen_sql('users', '$1')} AS last_seen
              FROM users
             WHERE id <> $1
               AND (username_lower LIKE $2 OR lower(display_name) LIKE $2)
@@ -58,6 +61,31 @@ async def my_qr(user_id: str = Depends(require_auth)):
     img.save(buf, format="PNG")
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png")
+
+
+@router.get("/me/privacy")
+async def my_privacy(user_id: str = Depends(require_auth)):
+    row = await one("SELECT read_receipts, last_seen_privacy, photo_privacy FROM users WHERE id = $1", user_id)
+    return {"readReceipts": row["read_receipts"], "lastSeen": row["last_seen_privacy"], "photo": row["photo_privacy"]}
+
+
+@router.patch("/me/privacy")
+async def set_privacy(request: Request, user_id: str = Depends(require_auth)):
+    """{readReceipts?, lastSeen?, photo?}: lastSeen/photo are everyone | contacts | nobody."""
+    body = await request.json()
+    sets, args = [], [user_id]
+    if "readReceipts" in body:
+        args.append(bool(body["readReceipts"]))
+        sets.append(f"read_receipts = ${len(args)}")
+    for key, col in (("lastSeen", "last_seen_privacy"), ("photo", "photo_privacy")):
+        if key in body:
+            if body[key] not in privacy.CHOICES:
+                raise HTTPException(400, "Choose everyone, contacts or nobody.")
+            args.append(body[key])
+            sets.append(f"{col} = ${len(args)}")
+    if sets:
+        await execute(f"UPDATE users SET {', '.join(sets)} WHERE id = $1", *args)
+    return await my_privacy(user_id)
 
 
 @router.post("/me/photo")
@@ -87,8 +115,8 @@ async def upload_photo(photo: UploadFile = File(...), user_id: str = Depends(req
 
 
 @router.get("/{target_id}/photo")
-async def get_photo(target_id: str):
-    row = await one("SELECT photo_path FROM users WHERE id = $1", target_id)
+async def get_photo(target_id: str, user_id: str = Depends(require_auth)):
+    row = await one(f"SELECT {privacy.photo_sql('users', '$2')} AS photo_path FROM users WHERE id = $1", target_id, user_id)
     if not row or not row["photo_path"]:
         raise HTTPException(404, "No photo.")
     full = Path(AVATAR_DIR) / row["photo_path"]
@@ -163,9 +191,11 @@ async def update_appearance(request: Request, user_id: str = Depends(require_aut
 @router.get("/{target_id}")
 async def get_user(target_id: str, user_id: str = Depends(require_auth)):
     row = await one(
-        """SELECT id, username, display_name, avatar_color, about, photo_path, last_seen, public_key, business
+        f"""SELECT id, username, display_name, avatar_color, about, public_key, business,
+                   {privacy.photo_sql('users', '$2')} AS photo_path,
+                   {privacy.last_seen_sql('users', '$2')} AS last_seen
              FROM users WHERE id = $1""",
-        target_id,
+        target_id, user_id,
     )
     if not row:
         raise HTTPException(404, "No such user.")

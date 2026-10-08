@@ -61,3 +61,32 @@ async def starred_messages(user_id: str = Depends(require_auth)):
         "filePath": r["file_path"], "fileSize": int(r["file_size"]) if r["file_size"] else None,
         "createdAt": r["created_at"], "starredAt": r["starred_at"],
     } for r in rows]}
+
+
+@router.get("/{message_id}/info")
+async def message_info(message_id: str, user_id: str = Depends(require_auth)):
+    """Message info (my own messages): when each person got it and read it.
+    In a 1-to-1 chat, "read" stays hidden if either person turned read
+    receipts off."""
+    from app.utils.privacy import reads_hidden
+
+    msg = await one("SELECT conversation_id, sender_id, created_at FROM messages WHERE id = $1 AND deleted_at IS NULL", message_id)
+    if not msg or str(msg["sender_id"]) != str(user_id):
+        raise HTTPException(404, "Message not found.")
+    hide = await reads_hidden(str(msg["conversation_id"]))
+    rows = await query(
+        """SELECT u.id, u.display_name, r.delivered_at, r.read_at
+             FROM message_receipts r JOIN users u ON u.id = r.user_id
+            WHERE r.message_id = $1
+            ORDER BY r.read_at NULLS LAST, r.delivered_at NULLS LAST, u.display_name""",
+        message_id,
+    )
+    return {
+        "sentAt": msg["created_at"],
+        "readsHidden": hide,
+        "recipients": [{
+            "userId": r["id"], "name": r["display_name"],
+            "deliveredAt": r["delivered_at"] or r["read_at"],
+            "readAt": None if hide else r["read_at"],
+        } for r in rows],
+    }

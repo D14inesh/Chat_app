@@ -1,6 +1,7 @@
-"""Age rules: 1-to-1 chats and calls are for people 18 and over.
-Under-18s (13+) can use the app for groups. Ages come from the date of
-birth each person gives — the server can't verify it."""
+"""Age rule: only private (1-to-1) chats and calls are for people 18 and
+over. Everything else is open to everyone, and a date of birth is only
+asked for when someone first opens a private chat. Ages come from the
+date of birth each person gives — the server can't verify it."""
 from datetime import date
 
 from fastapi import HTTPException
@@ -8,11 +9,10 @@ from fastapi import HTTPException
 from app.core.database import one
 
 ADULT = 18
-MIN_AGE = 13
 
-ADULT_ONLY_MSG = "1-to-1 chats are for people 18 and over. You can still use groups."
-PEER_MINOR_MSG = "This person can't receive 1-to-1 chats."
-NEED_BIRTH_MSG = "Add your date of birth first (it's asked when you open the app)."
+ADULT_ONLY_MSG = "Private chats are for people 18 and over. Groups and everything else work for you."
+PEER_MINOR_MSG = "This person can't use private chats yet."
+NEED_BIRTH_MSG = "Add your date of birth to use private chats (they're 18+)."
 
 
 def age_on(birth: date, today: date | None = None) -> int:
@@ -28,9 +28,12 @@ def parse_birth_date(raw) -> date:
     years = age_on(d)
     if d > date.today() or years > 120:
         raise HTTPException(400, "That date of birth doesn't look right.")
-    if years < MIN_AGE:
-        raise HTTPException(400, f"You need to be at least {MIN_AGE} to use Veyon Chat.")
     return d
+
+
+def optional_birth_date(raw) -> date | None:
+    """Sign-up: the date of birth is optional (only private chats need it)."""
+    return parse_birth_date(raw) if str(raw or "").strip() else None
 
 
 def is_adult(birth: date | None) -> bool:

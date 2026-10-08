@@ -5,6 +5,11 @@ window.APP_CONFIG = {
   // below are ignored.
   apiBase: '',
 
+  // true = the API is on this same address under /api and /ws — how the
+  // server runs behind Nginx (deploy/nginx). That Nginx serves its own
+  // config.js with this set, so this file only matters for development.
+  sameOrigin: false,
+
   // Used when apiBase is empty: the backend is assumed to be on the same
   // host as this page (localhost or a LAN IP), on these ports.
   // TEMPORARY: 4100/4543 while the old chatapp still occupies 4000/4443.
