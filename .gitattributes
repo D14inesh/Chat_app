@@ -1,2 +1,7 @@
-# Shell scripts run inside Linux containers — CRLF line endings break them.
-*.sh text eol=lf
+# Scripts and configs that run on Linux must keep LF line endings even
+# when the repo is checked out on Windows.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.target        text eol=lf
+deploy/**/*.conf     text eol=lf
+deploy/**/*.template text eol=lf

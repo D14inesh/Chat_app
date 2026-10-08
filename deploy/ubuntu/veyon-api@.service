@@ -1,0 +1,45 @@
+# One Veyon Chat API worker (FastAPI + WebSocket). The instance name is its
+# port: veyon-api@4810, veyon-api@4811, ... — Nginx spreads users over them,
+# Redis lets them act as one app. Installed by deploy/ubuntu/setup.sh
+# ({{APP}} = the chat-application folder).
+#
+#   systemctl status 'veyon-api@*'        journalctl -u 'veyon-api@*' -f
+#   systemctl restart veyon.target        (all workers)
+
+[Unit]
+Description=Veyon Chat API worker on port %i
+After=network-online.target postgresql.service {{REDIS_SERVICE}}.service
+Wants=network-online.target postgresql.service {{REDIS_SERVICE}}.service
+PartOf=veyon.target
+
+[Service]
+Type=simple
+User=veyon
+Group=veyon
+WorkingDirectory={{APP}}/backend
+Environment=PORT=%i
+Environment=BEHIND_PROXY=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart={{APP}}/backend/venv/bin/python run.py
+Restart=always
+RestartSec=3
+# SIGTERM (the default): the worker finishes open requests and closes its
+# sockets, then exits.
+TimeoutStopSec=20
+LimitNOFILE=65535
+
+# Hardening: read-only system and code; writes only to its data folders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/veyon /var/backups/veyon
+
+[Install]
+WantedBy=veyon.target

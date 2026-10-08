@@ -1,0 +1,54 @@
+# Veyon Chat on Ubuntu — written to /etc/nginx/sites-available/veyon by
+# deploy/ubuntu/setup.sh from deploy/nginx/ubuntu-site.conf.template.
+# Edit the template and re-run setup rather than this copy.
+#
+#   Users ──► Nginx ──► API workers (FastAPI + WebSocket) ──► Redis / PostgreSQL
+
+# Don't tell the world which Nginx version this is.
+server_tokens off;
+
+# WebSocket: pass "Upgrade" through; plain requests keep the upstream
+# connection open for reuse.
+map $http_upgrade $connection_upgrade {
+    default  upgrade;
+    ''       '';
+}
+
+# The API workers (systemd veyon-api@<port>). least_conn: a new connection
+# goes to the worker with the fewest open ones, so sockets spread evenly.
+upstream veyon_api {
+    least_conn;
+{{UPSTREAMS}}
+    keepalive 32;
+}
+
+# ── HTTP: Let's Encrypt checks, everything else → HTTPS ─────────────
+server {
+    listen       {{HTTP_PORT}};
+    listen       [::]:{{HTTP_PORT}};
+    server_name  {{SERVER_NAME}};
+
+    location /.well-known/acme-challenge/ {
+        root  /var/www/letsencrypt;
+    }
+    location / {
+        return 301 https://$host{{HTTPS_SUFFIX}}$request_uri;
+    }
+}
+
+# ── Website + its API on one address ─────────────────────────────────
+server {
+    listen       {{HTTPS_PORT}} ssl{{H2_LISTEN}};
+    listen       [::]:{{HTTPS_PORT}} ssl{{H2_LISTEN}};
+{{H2_ON}}    server_name  {{SERVER_NAME}};
+    include      veyon-tls.conf;
+
+    root  {{PUBLIC}};
+    # Uploads (photos, videos, voice notes) — a little above MAX_UPLOAD_BYTES.
+    client_max_body_size  110m;
+    gzip_types  text/css text/javascript application/javascript application/json image/svg+xml;
+
+    include  veyon-api.conf;
+    include  veyon-site.conf;
+}
+{{APP_SERVER}}

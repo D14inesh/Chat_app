@@ -6,8 +6,13 @@ Users ──► Nginx ──┬──► API worker 1 (FastAPI: HTTP API + WebSo
                   └──► ...                                            └──► PostgreSQL
 ```
 
-Everything runs on one Windows server. `scripts\setup-server.ps1` installs
-and wires it up; `scripts\update-server.ps1` pulls new code and re-runs it.
+The same layout runs on two kinds of server:
+
+- **Ubuntu (recommended for production):** see [ubuntu/README.md](ubuntu/README.md).
+  It uses systemd, free trusted HTTPS, has no connection limit, and updates
+  without downtime.
+- **Windows** (this page): `scripts\setup-server.ps1` installs and wires it
+  up; `scripts\update-server.ps1` pulls new code and re-runs it.
 
 | Piece | Where | Reachable from |
 |---|---|---|
