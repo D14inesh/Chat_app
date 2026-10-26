@@ -24,6 +24,11 @@
 #   --app-port P      extra HTTPS port with the API only, for the phone app
 #                     (default 4843 = what the current APK uses; 0 = off)
 #   --worker-port P   first worker port on 127.0.0.1 (default 4810)
+#   --api-domain N    the phone app's own name, e.g. api.example.com (API only, no website;
+#                     needs --domain; same certificate). Build the app with
+#                     --dart-define=VEYON_API_BASE_URL=https://api.example.com
+#   --admin-domain N  owner's admin app (admin/) on its own name, e.g. admin.example.com
+#                     (needs --domain; same Let's Encrypt certificate, own login)
 set -euo pipefail
 # (Never `cmd | grep -q` here: with pipefail, grep quitting early can make the
 # pipe fail at random. Capture the output first, then test it.)
@@ -48,7 +53,7 @@ die()  { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 [ -f "$APP/backend/run.py" ] || die "run this from the chat-application repo (backend/run.py not found)"
 
 # ── Options (command line > remembered > defaults) ───────────────────
-DOMAIN="" EMAIL="" IP="" WORKERS="" HTTPS_PORT="" HTTP_PORT="" APP_PORT="" WORKER_PORT=""
+DOMAIN="" EMAIL="" IP="" WORKERS="" HTTPS_PORT="" HTTP_PORT="" APP_PORT="" WORKER_PORT="" ADMIN_DOMAIN="" API_DOMAIN=""
 # shellcheck source=/dev/null
 [ -f "$SAVED" ] && . "$SAVED"
 while [ $# -gt 0 ]; do
@@ -61,6 +66,8 @@ while [ $# -gt 0 ]; do
         --http-port) HTTP_PORT="$2"; shift 2 ;;
         --app-port) APP_PORT="$2"; shift 2 ;;
         --worker-port) WORKER_PORT="$2"; shift 2 ;;
+        --admin-domain) ADMIN_DOMAIN="$2"; shift 2 ;;
+        --api-domain) API_DOMAIN="$2"; shift 2 ;;
         -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
@@ -74,6 +81,8 @@ if [ -z "$DOMAIN" ] && [ -z "$IP" ]; then
     warn "no --domain or --ip given: using this machine's address $IP (self-signed HTTPS)"
 fi
 [ -n "$DOMAIN" ] && [ -z "$EMAIL" ] && die "--domain needs --email (Let's Encrypt sends expiry notices there)"
+[ -n "$ADMIN_DOMAIN$API_DOMAIN" ] && [ -z "$DOMAIN" ] && die "--admin-domain / --api-domain need --domain"
+[ -n "$ADMIN_DOMAIN" ] && [ ! -f "$APP/admin/server.py" ] && die "admin/ folder not found in the repo (--admin-domain needs it)"
 NAME=${DOMAIN:-$IP}
 SUFFIX=""; [ "$HTTPS_PORT" != 443 ] && SUFFIX=":$HTTPS_PORT"
 ORIGIN="https://$NAME$SUFFIX"
@@ -85,6 +94,8 @@ if [ -n "$DOMAIN" ]; then HOW="Let's Encrypt"; else HOW="self-signed"; fi
 echo "  address:      $ORIGIN   ($HOW)"
 if [ "$APP_PORT" = 0 ]; then echo "  phone app:    uses $ORIGIN"; else echo "  phone app:    https://$NAME:$APP_PORT (API only)"; fi
 echo "  workers:      $WORKERS on 127.0.0.1: $WORKER_PORTS"
+[ -n "$ADMIN_DOMAIN" ] && echo "  admin:        https://$ADMIN_DOMAIN$SUFFIX"
+[ -n "$API_DOMAIN" ] && echo "  phone app:    https://$API_DOMAIN$SUFFIX (API only)"
 
 # Remembered right away, so re-running after a failure keeps these choices
 # (later runs and update.sh need no options).
@@ -99,6 +110,8 @@ HTTPS_PORT="$HTTPS_PORT"
 HTTP_PORT="$HTTP_PORT"
 APP_PORT="$APP_PORT"
 WORKER_PORT="$WORKER_PORT"
+ADMIN_DOMAIN="$ADMIN_DOMAIN"
+API_DOMAIN="$API_DOMAIN"
 EOF
 
 # ── Packages ─────────────────────────────────────────────────────────
@@ -129,8 +142,8 @@ install -d -m 755 -o root -g root "$SITE" "$CONF_DIR" /var/www/letsencrypt
 for sub in uploads avatars wallpapers chat_backups catalog; do install -d -m 750 -o veyon -g veyon "$DATA/storage/$sub"; done
 # Nginx (www-data) serves the website straight from the repo: every folder
 # on the way must be enterable.
-if ! sudo -u www-data test -r "$APP/frontend/public/index.html"; then
-    die "Nginx can't read $APP/frontend/public — put the repo under /opt (e.g. /opt/veyon/chat-application), not a private home folder"
+if ! sudo -u www-data test -r "$APP/application/public/index.html"; then
+    die "Nginx can't read $APP/application/public — put the repo under /opt (e.g. /opt/veyon/chat-application), not a private home folder"
 fi
 ok "service user 'veyon', data in $DATA, backups in $BACKUPS"
 
@@ -187,6 +200,37 @@ setenv STORAGE_DIR "$DATA/storage"
 setenv BACKUP_DIR "$BACKUPS"
 chown root:veyon "$ENV_FILE"; chmod 640 "$ENV_FILE"
 ok "PostgreSQL user 'veyon', Redis password, CORS for $ORIGIN (file readable by root and veyon only)"
+
+# ── Admin app (optional) ─────────────────────────────────────────────
+ADMIN_ENV="$APP/admin/.env"
+if [ -n "$ADMIN_DOMAIN" ]; then
+    step "Admin app"
+    [ -x "$APP/admin/venv/bin/python" ] || python3 -m venv "$APP/admin/venv"
+    "$APP/admin/venv/bin/pip" install -q --upgrade pip
+    "$APP/admin/venv/bin/pip" install -q -r "$APP/admin/requirements.txt"
+    ADMIN_PW=$([ -f "$ADMIN_ENV" ] && sed -n 's/^ADMIN_PASSWORD=//p' "$ADMIN_ENV" | tail -1 || true)
+    NEW_ADMIN_PW=0
+    [ -n "$ADMIN_PW" ] || { ADMIN_PW=$(secret 12); NEW_ADMIN_PW=1; }
+    # Behind Nginx every request looks local, so a first-visit "choose a
+    # password" page would be open to the world: always set the password here.
+    cat > "$ADMIN_ENV" <<EOF
+# Written by deploy/ubuntu/setup.sh - the owner's admin app
+PORT=4700
+HOST=127.0.0.1
+BEHIND_PROXY=1
+PGHOST=127.0.0.1
+PGPORT=5432
+PGUSER=veyon
+PGPASSWORD=$PGPASS
+PGDATABASE=$PGDB
+CHAT_STORAGE_DIR=$DATA/storage
+CHAT_BACKUP_DIR=$BACKUPS
+ADMIN_PASSWORD=$ADMIN_PW
+EOF
+    chown root:veyon "$ADMIN_ENV"; chmod 640 "$ADMIN_ENV"
+    install -d -m 750 -o veyon -g veyon "$APP/admin/data"
+    ok "admin app installed (login password is in $ADMIN_ENV)"
+fi
 
 # ── PostgreSQL ───────────────────────────────────────────────────────
 step "PostgreSQL"
@@ -256,7 +300,14 @@ self_signed() {
     fi
 }
 LE_DIR="/etc/letsencrypt/live/$DOMAIN"
-if [ -n "$DOMAIN" ] && [ -f "$LE_DIR/fullchain.pem" ]; then
+LE_NAMES=""
+have_names() {   # every extra name is on the current certificate
+    local n
+    for n in $ADMIN_DOMAIN $API_DOMAIN; do [[ "$LE_NAMES" == *"DNS:$n"* ]] || return 1; done
+}
+[ -f "$LE_DIR/fullchain.pem" ] && LE_NAMES=$(openssl x509 -in "$LE_DIR/fullchain.pem" -noout -ext subjectAltName 2>/dev/null || true)
+# A certificate made before --admin-domain was added doesn't cover it: renew with both names.
+if [ -n "$DOMAIN" ] && [ -f "$LE_DIR/fullchain.pem" ] && have_names; then
     CERT="$LE_DIR/fullchain.pem"; KEY="$LE_DIR/privkey.pem"; HSTS=1
     ok "Let's Encrypt certificate for $DOMAIN (renews automatically)"
 else
@@ -286,8 +337,52 @@ ${h2on}    server_name  $NAME;
     include      veyon-tls.conf;
     client_max_body_size  110m;
 
+    location ~ ^/api/auth/(login|register|otp|contact/otp|reset/otp|reset/verify|reset/complete)$ {
+        limit_req   zone=veyon_login  burst=10 nodelay;
+        proxy_pass  http://veyon_api;
+        include     veyon-proxy.conf;
+    }
+
     location / {
         proxy_pass  http://veyon_api;
+        include     veyon-proxy.conf;
+    }
+}"
+    fi
+    if [ -n "$API_DOMAIN" ]; then
+        app_server="$app_server
+# ── API only, for the phone app, on its own name ──────────────────────
+server {
+    listen       $HTTPS_PORT ssl$h2l;
+    listen       [::]:$HTTPS_PORT ssl$h2l;
+${h2on}    server_name  $API_DOMAIN;
+    include      veyon-tls.conf;
+    client_max_body_size  110m;
+
+    location ~ ^/api/auth/(login|register|otp|contact/otp|reset/otp|reset/verify|reset/complete)$ {
+        limit_req   zone=veyon_login  burst=10 nodelay;
+        proxy_pass  http://veyon_api;
+        include     veyon-proxy.conf;
+    }
+
+    location / {
+        proxy_pass  http://veyon_api;
+        include     veyon-proxy.conf;
+    }
+}"
+    fi
+    if [ -n "$ADMIN_DOMAIN" ]; then
+        app_server="$app_server
+# ── Admin app (admin/, port 4700 on this machine only) ────────────────
+server {
+    listen       $HTTPS_PORT ssl$h2l;
+    listen       [::]:$HTTPS_PORT ssl$h2l;
+${h2on}    server_name  $ADMIN_DOMAIN;
+    include      veyon-tls.conf;
+    client_max_body_size  10m;
+
+    location / {
+        proxy_pass  http://127.0.0.1:4700;
         include     veyon-proxy.conf;
     }
 }"
@@ -297,8 +392,8 @@ import sys
 src, dst = sys.argv[1:3]
 s = open(src, encoding="utf-8").read()
 ups = "\n".join(f"    server 127.0.0.1:{p} max_fails=2 fail_timeout=3s;" for p in "$WORKER_PORTS".split())
-for k, v in {"UPSTREAMS": ups, "HTTP_PORT": "$HTTP_PORT", "HTTPS_PORT": "$HTTPS_PORT", "SERVER_NAME": "$NAME",
-             "HTTPS_SUFFIX": "$SUFFIX", "PUBLIC": "$APP/frontend/public", "H2_LISTEN": "$h2l",
+for k, v in {"UPSTREAMS": ups, "HTTP_PORT": "$HTTP_PORT", "HTTPS_PORT": "$HTTPS_PORT", "SERVER_NAME": "$NAME", "HTTP_NAMES": "$NAME $ADMIN_DOMAIN $API_DOMAIN".strip(),
+             "HTTPS_SUFFIX": "$SUFFIX", "PUBLIC": "$APP/application/public", "H2_LISTEN": "$h2l",
              "H2_ON": """$h2on""", "APP_SERVER": """$app_server"""}.items():
     s = s.replace("{{" + k + "}}", v)
 open(dst, "w", encoding="utf-8").write(s)
@@ -321,10 +416,17 @@ PY
 step "Nginx"
 # Room for many live sockets (each online user holds two connections).
 sed -i -E 's/^(\s*)worker_connections\s+[0-9]+;/\1worker_connections 8192;/' /etc/nginx/nginx.conf
+# Don't tell the world which Nginx version this is. (Set in nginx.conf itself:
+# some Ubuntu versions already have a line there, and a second one is an error.)
+if grep -qE '^\s*#?\s*server_tokens' /etc/nginx/nginx.conf; then
+    sed -i -E 's/^(\s*)#?\s*server_tokens\s+[^;]+;.*/server_tokens off;/' /etc/nginx/nginx.conf
+else
+    sed -i '/^http {/a \tserver_tokens off;' /etc/nginx/nginx.conf
+fi
 grep -q '^worker_rlimit_nofile' /etc/nginx/nginx.conf || sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
 # The website's own config (API on the same address) and version fingerprint.
 printf "// Generated by deploy/ubuntu/setup.sh - the API is behind the same Nginx.\nwindow.APP_CONFIG = { apiBase: '', sameOrigin: true };\n" > "$SITE/config.js"
-VERSION=$(cd "$APP/frontend/public" && find . -type f -printf '%P|%s|%T@\n' | sort | sha256sum | cut -c1-16)
+VERSION=$(cd "$APP/application/public" && find . -type f -printf '%P|%s|%T@\n' | sort | sha256sum | cut -c1-16)
 printf '{"version":"%s"}\n' "$VERSION" > "$SITE/version.json"
 write_nginx
 nginx -t 2>&1 | sed 's/^/  /' || die "Nginx config check failed (see above)"
@@ -334,7 +436,8 @@ ok "website + API on $ORIGIN$([ "$APP_PORT" != 0 ] && echo ", phone-app API on :
 
 if [ -n "$DOMAIN" ] && [ "$HSTS" = 0 ]; then
     step "Let's Encrypt"
-    if certbot certonly --webroot -w /var/www/letsencrypt -d "$DOMAIN" --email "$EMAIL" \
+    if certbot certonly --webroot -w /var/www/letsencrypt --cert-name "$DOMAIN" -d "$DOMAIN" \
+            $([ -n "$ADMIN_DOMAIN$API_DOMAIN" ] && echo "--expand") ${ADMIN_DOMAIN:+-d $ADMIN_DOMAIN} ${API_DOMAIN:+-d $API_DOMAIN} --email "$EMAIL" \
             --agree-tos --non-interactive --keep-until-expiring; then
         CERT="$LE_DIR/fullchain.pem"; KEY="$LE_DIR/privkey.pem"; HSTS=1
         write_nginx; nginx -t >/dev/null 2>&1 && systemctl reload nginx
@@ -373,6 +476,20 @@ for port in $WORKER_PORTS; do
     if [ "$port" != "${WORKER_PORTS##* }" ]; then sleep 4; fi
 done
 
+# ── Admin service ────────────────────────────────────────────────────
+if [ -n "$ADMIN_DOMAIN" ]; then
+    step "Admin service"
+    sed "s#{{APP}}#$APP#g" "$DEPLOY/ubuntu/veyon-admin.service" > /etc/systemd/system/veyon-admin.service
+    systemctl daemon-reload
+    systemctl enable veyon-admin >/dev/null 2>&1
+    systemctl restart veyon-admin
+    for _ in $(seq 40); do curl -fsS --max-time 2 http://127.0.0.1:4700/api/session >/dev/null 2>&1 && break; sleep 0.5; done
+    curl -fsS --max-time 2 http://127.0.0.1:4700/api/session >/dev/null 2>&1 \
+        && ok "veyon-admin up on 127.0.0.1:4700" || die "veyon-admin didn't start - journalctl -u veyon-admin -n 50"
+elif systemctl is-enabled -q veyon-admin 2>/dev/null; then
+    systemctl disable --now veyon-admin >/dev/null 2>&1; echo "  veyon-admin stopped (no --admin-domain)"
+fi
+
 # ── Firewall ─────────────────────────────────────────────────────────
 if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null)" == *"Status: active"* ]]; then
     step "Firewall (ufw)"
@@ -388,6 +505,8 @@ cat <<EOF
 $(printf '\033[1;32mDone.\033[0m')
   Website:     $ORIGIN
   Phone app:   $([ "$APP_PORT" != 0 ] && echo "https://$NAME:$APP_PORT" || echo "uses $ORIGIN")
+$([ -n "$API_DOMAIN" ] && echo "  Phone app:   https://$API_DOMAIN$SUFFIX   (API only)")
+$([ -n "$ADMIN_DOMAIN" ] && echo "  Admin:       https://$ADMIN_DOMAIN$SUFFIX   (password: sudo grep ADMIN_PASSWORD $ADMIN_ENV)")
   Logs:        journalctl -u 'veyon-api@*' -f      /var/log/nginx/
   Restart:     systemctl restart veyon.target
   Update:      sudo bash deploy/ubuntu/update.sh

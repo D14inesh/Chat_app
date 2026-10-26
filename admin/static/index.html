@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Chat Report Center</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23e8a33d'/%3E%3Cpath d='M7 22V12m6 10V8m6 14v-7m6 7V11' fill='none' stroke='%23181410' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f4f1ea; --panel:#fffdf8; --panel2:#f8f4ea; --ink:#1d1a14; --mute:#7a7364; --line:#e4ddcc;
+  --amber:#c9801a; --amber-soft:#f6e4c4; --teal:#127a6e; --teal-soft:#d3ece7; --rose:#b8382f; --rose-soft:#f6d9d5;
+  --bar:#c9801a; --bar2:#127a6e; --shadow:0 1px 0 rgba(0,0,0,.03),0 8px 24px -14px rgba(60,40,0,.25);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#14120e; --panel:#1c1913; --panel2:#221e16; --ink:#f1ead9; --mute:#9a9181; --line:#312c21;
+  --amber:#e8a33d; --amber-soft:#3a2d14; --teal:#3cc2ae; --teal-soft:#123831; --rose:#f0786d; --rose-soft:#3d1f1c;
+  --bar:#e8a33d; --bar2:#3cc2ae; --shadow:0 8px 24px -14px rgba(0,0,0,.7);}}
+:root[data-theme=dark]{
+  --bg:#14120e; --panel:#1c1913; --panel2:#221e16; --ink:#f1ead9; --mute:#9a9181; --line:#312c21;
+  --amber:#e8a33d; --amber-soft:#3a2d14; --teal:#3cc2ae; --teal-soft:#123831; --rose:#f0786d; --rose-soft:#3d1f1c;
+  --bar:#e8a33d; --bar2:#3cc2ae; --shadow:0 8px 24px -14px rgba(0,0,0,.7);}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;min-height:100vh}
+button,input,select,textarea{font:inherit;color:inherit}
+.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+h1,h2,h3{margin:0;font-weight:700;letter-spacing:-.01em}
+.hide{display:none!important}
+a{color:inherit;text-decoration:none}
+
+.gate{min-height:100vh;display:grid;place-items:center;padding:24px}
+.gate-card{width:100%;max-width:400px;background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:32px 28px;box-shadow:var(--shadow)}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+.logo i{width:38px;height:38px;border-radius:11px;background:var(--amber);display:grid;place-items:center;flex:none}
+.logo i svg{width:20px;height:20px}
+.logo b{font-size:17px;letter-spacing:-.01em}.logo small{display:block;color:var(--mute);font-size:12px;margin-top:-2px}
+label.f{display:block;margin:14px 0 6px;font-size:12.5px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
+input[type=text],input[type=password],input[type=email],input[type=number],input[type=search],select,textarea{
+  width:100%;padding:11px 13px;border-radius:12px;border:1px solid var(--line);background:var(--panel2);outline:none}
+textarea{resize:vertical;min-height:96px}
+input:focus,select:focus,textarea:focus{border-color:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:12px;border:1px solid var(--line);background:var(--panel);cursor:pointer;font-weight:600}
+.btn:hover{border-color:var(--amber)}
+.btn.pri{background:var(--amber);border-color:var(--amber);color:#1b1408}
+.btn.pri:hover{filter:brightness(1.06)}
+.btn.sm{padding:6px 12px;font-size:13px;border-radius:10px}
+.btn:disabled{opacity:.55;cursor:wait}
+.msg{margin-top:14px;font-size:13.5px;padding:10px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
+.msg.err{background:var(--rose-soft);color:var(--rose)}.msg.ok{background:var(--teal-soft);color:var(--teal)}.msg.info{background:var(--amber-soft);color:var(--ink)}
+
+.shell{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.side{position:sticky;top:0;height:100vh;padding:22px 14px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:4px;background:var(--bg)}
+.side .logo{padding:0 8px;margin-bottom:18px}
+.nav{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:12px;border:0;background:none;cursor:pointer;color:var(--mute);font-weight:600;text-align:left;width:100%}
+.nav svg{width:18px;height:18px;flex:none}
+.nav:hover{background:var(--panel2);color:var(--ink)}
+.nav[aria-current=page]{background:var(--ink);color:var(--bg)}
+.side .grow{flex:1}
+main{padding:28px clamp(16px,3vw,40px) 60px;min-width:0;max-width:1240px}
+.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.top h1{font-size:26px}.top p{margin:2px 0 0;color:var(--mute);font-size:13.5px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+.grid{display:grid;gap:14px}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px 20px;box-shadow:var(--shadow);min-width:0}
+.card h3{font-size:13px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
+.big{font-size:38px;font-weight:700;letter-spacing:-.03em;line-height:1.05;font-variant-numeric:tabular-nums}
+.sub{color:var(--mute);font-size:13px;margin-top:6px}
+.sub b{color:var(--ink)}
+.hero{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.hero h3,.hero .sub{color:color-mix(in srgb,var(--bg) 62%,transparent)}.hero .sub b{color:var(--bg)}
+.hero .big{font-size:54px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700}
+.pill.ok{background:var(--teal-soft);color:var(--teal)}.pill.bad{background:var(--rose-soft);color:var(--rose)}.pill.warn{background:var(--amber-soft);color:var(--amber)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+.live .dot{animation:pulse 1.8s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.sec{margin-top:26px}
+
+.chart{width:100%;height:120px;display:block}
+.chart rect.b{fill:var(--bar)}.chart rect.b2{fill:var(--bar2)}.chart rect.hov{fill:transparent}
+.chart g:hover rect.b,.chart g:hover rect.b2{filter:brightness(1.2)}
+.chart text{fill:var(--mute);font-size:10px}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);padding:5px 9px;border-radius:8px;font-size:12px;z-index:50;transform:translate(-50%,-130%);white-space:nowrap}
+.hb{display:grid;grid-template-columns:96px 1fr auto;gap:10px;align-items:center;margin:7px 0;font-size:13.5px}
+.hb .t{height:9px;border-radius:9px;background:var(--panel2);overflow:hidden}.hb .t i{display:block;height:100%;background:var(--bar);border-radius:9px}
+.hb.alt .t i{background:var(--bar2)}
+.hb span:last-child{font-variant-numeric:tabular-nums;font-weight:600}
+.split{display:flex;height:14px;border-radius:9px;overflow:hidden;background:var(--panel2);margin:10px 0 8px}
+.split i{display:block;height:100%}
+
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;min-width:760px;font-size:14px}
+th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+tr:last-child td{border-bottom:0}
+tr:hover td{background:var(--panel2)}
+
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.hint{color:var(--mute);font-size:12.5px;margin-top:5px}
+.secret{position:relative}.secret input{padding-right:96px}
+.secret .tag{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:11.5px;font-weight:700}
+.sw{display:flex;align-items:center;gap:12px;cursor:pointer;margin:6px 0}
+.sw input{appearance:none;-webkit-appearance:none;width:44px;height:25px;border-radius:99px;background:var(--line);position:relative;cursor:pointer;transition:.15s;flex:none;margin:0}
+.sw input::after{content:"";position:absolute;left:3px;top:3px;width:19px;height:19px;border-radius:50%;background:#fff;transition:.15s}
+.sw input:checked{background:var(--teal)}.sw input:checked::after{left:22px}
+.steps{margin:8px 0 0;padding-left:20px;color:var(--mute);font-size:13.5px}.steps li{margin:3px 0}.steps b{color:var(--ink)}
+.empty{color:var(--mute);padding:18px;text-align:center}
+pre.env{margin:10px 0 0;padding:12px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:auto;font-size:12.5px}
+
+@media(max-width:980px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){
+  .shell{grid-template-columns:1fr}
+  .side{position:fixed;inset:auto 0 0 0;height:auto;flex-direction:row;padding:6px;border:0;border-top:1px solid var(--line);z-index:20;justify-content:space-around;background:var(--panel)}
+  .side .logo,.side .grow,.side .desk{display:none}
+  .nav{flex-direction:column;gap:2px;font-size:11px;padding:7px 4px;justify-content:center;align-items:center;text-align:center}
+  main{padding-bottom:96px}
+  .g2,.g3,.g4,.field-row{grid-template-columns:1fr}
+  .hero .big{font-size:46px}
+}
+@media print{.side,.top .row,.btn{display:none!important}.shell{display:block}body{background:#fff}}
+</style>
+</head>
+<body>
+
+<section class="gate hide" id="gate">
+  <form class="gate-card" id="gateForm" autocomplete="off">
+    <div class="logo"><i class="brandMark"><svg viewBox="0 0 32 32"><path d="M7 22V12m6 10V8m6 14v-7m6 7V11" fill="none" stroke="#181410" stroke-width="3.2" stroke-linecap="round"/></svg></i><div><b class="brandName">Chat Report Center</b><small>Owner access only</small></div></div>
+    <h2 id="gateTitle" style="font-size:20px">Sign in</h2>
+    <p class="hint" id="gateHint" style="margin-top:4px"></p>
+    <label class="f" for="pw">Password</label>
+    <input type="password" id="pw" required>
+    <div id="pw2wrap" class="hide"><label class="f" for="pw2">Repeat password</label><input type="password" id="pw2" autocomplete="new-password"></div>
+    <div class="row" style="margin-top:18px"><button class="btn pri" id="gateBtn" style="flex:1;justify-content:center">Sign in</button></div>
+    <div class="msg err hide" id="gateMsg"></div>
+  </form>
+</section>
+
+<div class="shell hide" id="shell">
+  <aside class="side">
+    <div class="logo"><i class="brandMark"><svg viewBox="0 0 32 32"><path d="M7 22V12m6 10V8m6 14v-7m6 7V11" fill="none" stroke="#181410" stroke-width="3.2" stroke-linecap="round"/></svg></i><div><b class="brandName">Chat Report</b><small>Admin</small></div></div>
+    <button class="nav" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Overview</button>
+    <button class="nav" data-tab="users"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 010 6.8M18.5 14.8c1.8.7 2.8 2.5 3 5.2"/></svg>Users</button>
+    <button class="nav" data-tab="reports"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Reports</button>
+    <button class="nav" data-tab="mail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3.5 7l8.5 6 8.5-6"/></svg>Email</button>
+    <button class="nav" data-tab="ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>AI &amp; Voice</button>
+    <button class="nav" data-tab="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>App name &amp; logo</button>
+    <button class="nav" data-tab="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>System</button>
+    <div class="grow"></div>
+    <button class="nav desk" id="themeBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Theme</button>
+    <button class="nav desk" id="outBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>Sign out</button>
+  </aside>
+
+  <main>
+    <div class="top">
+      <div><h1 id="title">Overview</h1><p id="subtitle"></p></div>
+      <div class="row"><span id="liveTag" class="pill ok live"><i class="dot"></i><span id="liveTxt">Live</span></span><button class="btn sm" id="refreshBtn">Refresh</button></div>
+    </div>
+
+    <section data-pane="overview">
+      <div id="dbWarn"></div>
+      <div class="grid g4" id="kpis"></div>
+      <div class="grid g2 sec" id="ovCharts"></div>
+      <div class="sec"><div class="grid g4" id="health"></div></div>
+    </section>
+
+    <section data-pane="users" class="hide">
+      <div class="row" style="margin-bottom:14px">
+        <input type="search" id="uq" placeholder="Search name, username, email or phone" style="flex:1;min-width:220px;max-width:420px">
+        <select id="usort" style="width:auto"><option value="new">Newest first</option><option value="seen">Last seen</option><option value="name">Name A–Z</option></select>
+        <a class="btn" href="/api/export/users.csv" download>Download all users (CSV)</a>
+      </div>
+      <div class="tw"><table><thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Mobile</th><th>Joined</th><th>Last seen</th><th>Last device</th><th>Status</th></tr></thead><tbody id="utb"></tbody></table></div>
+      <div class="row" style="margin-top:12px;justify-content:space-between"><span class="hint" id="ucount"></span><span class="row"><button class="btn sm" id="uprev">← Prev</button><button class="btn sm" id="unext">Next →</button></span></div>
+    </section>
+
+    <section data-pane="reports" class="hide">
+      <div class="row">
+        <a class="btn pri" href="/api/export/daily.csv" download>Download daily report (CSV, 90 days)</a>
+        <a class="btn" href="/api/export/users.csv" download>Download users (CSV)</a>
+        <button class="btn" id="mailRepBtn">Email me this report</button>
+        <button class="btn" onclick="window.print()">Print / save as PDF</button>
+      </div>
+      <div class="msg hide" id="repMsg"></div>
+      <div class="grid g2 sec" id="rpA"></div>
+      <div class="grid g3 sec" id="rpB"></div>
+    </section>
+
+    <section data-pane="mail" class="hide">
+      <div class="grid g2">
+        <form class="card" id="mailForm" autocomplete="off">
+          <h3>Sender email &amp; app password</h3>
+          <label class="f">Sender email (Gmail)</label><input type="email" id="smtp_user" placeholder="yourapp@gmail.com">
+          <label class="f">App password</label>
+          <div class="secret"><input type="password" id="smtp_pass" placeholder="16-letter Gmail app password" autocomplete="new-password"><span class="tag" id="smtp_pass_tag"></span></div>
+          <div class="field-row">
+            <div><label class="f">Show as (name)</label><input type="text" id="mail_from_name" placeholder="Veyon Chat"></div>
+            <div><label class="f">From address</label><input type="email" id="mail_from" placeholder="same as sender"></div>
+          </div>
+          <div class="field-row">
+            <div><label class="f">SMTP server</label><input type="text" id="smtp_host" placeholder="smtp.gmail.com"></div>
+            <div><label class="f">Port</label><input type="number" id="smtp_port" placeholder="587"></div>
+          </div>
+          <label class="f">Owner email (reports are sent here)</label><input type="email" id="owner_email" placeholder="you@example.com">
+          <div class="row" style="margin-top:18px"><button class="btn pri" type="submit">Save</button></div>
+          <div class="msg hide" id="mailMsg"></div>
+        </form>
+        <div class="grid" style="align-content:start">
+          <div class="card"><h3>Send a test email</h3>
+            <input type="email" id="testTo" placeholder="send test to… (blank = owner email)"><div class="row" style="margin-top:12px"><button class="btn" id="testMailBtn">Send test</button></div>
+            <div class="msg hide" id="testMailMsg"></div></div>
+          <div class="card"><h3>Gmail setup in 4 steps</h3>
+            <ol class="steps"><li>Google account → <b>Security</b> → turn on <b>2-Step Verification</b>.</li><li>Search <b>App passwords</b>, create one named “Chat”.</li><li>Paste the 16 letters above (spaces don’t matter).</li><li>Save, then press <b>Send test</b>.</li></ol></div>
+          <div class="card"><h3>Use these in the chat backend</h3>
+            <p class="hint" style="margin:0">This app never edits the chat application. If you want the chat backend to send mails with the same sender, copy these lines into its <span class="mono">.env</span> yourself.</p>
+            <div class="row" style="margin-top:12px"><button class="btn sm" id="envBtn">Show .env lines</button></div><pre class="env hide" id="envOut"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <section data-pane="ai" class="hide">
+      <div class="grid g2">
+        <form class="card" id="aiForm" autocomplete="off">
+          <h3>AI API key</h3>
+          <label class="f">Provider</label>
+          <select id="ai_provider"><option value="">Not set</option><option value="openai">OpenAI / compatible (Groq, OpenRouter…)</option><option value="anthropic">Anthropic (Claude)</option><option value="gemini">Google Gemini</option></select>
+          <label class="f">API key</label>
+          <div class="secret"><input type="password" id="ai_key" placeholder="paste your key" autocomplete="new-password"><span class="tag" id="ai_key_tag"></span></div>
+          <div class="field-row">
+            <div><label class="f">Model (optional)</label><input type="text" id="ai_model" placeholder="provider default"></div>
+            <div><label class="f">Base URL (optional)</label><input type="text" id="ai_base_url" placeholder="provider default"></div>
+          </div>
+          <p class="hint">Leave the key empty to keep the saved one. The key is shown only as the last 4 characters.</p>
+          <div class="row" style="margin-top:14px"><button class="btn pri" type="submit">Save</button><button class="btn" type="button" id="aiTestBtn">Test the key</button><button class="btn sm" type="button" id="aiClearBtn">Remove key</button></div>
+          <div class="msg hide" id="aiMsg"></div>
+        </form>
+        <form class="card" id="voiceForm">
+          <h3>“Hey ARM” voice replier</h3>
+          <label class="sw"><input type="checkbox" id="voice_enabled"><span><b>Voice replier on</b></span></label>
+          <label class="f">How ARM should talk</label>
+          <textarea id="voice_prompt"></textarea>
+          <div class="field-row"><div><label class="f">Max words per reply</label><input type="number" id="voice_max_words" min="5" max="200" placeholder="40"></div><div></div></div>
+          <div class="row" style="margin-top:14px"><button class="btn pri" type="submit">Save</button></div>
+          <div class="msg hide" id="voiceMsg"></div>
+          <label class="f" style="margin-top:20px">Try it — what would the user say?</label>
+          <div class="row" style="flex-wrap:nowrap"><input type="text" id="vtext" placeholder="e.g. what is the time in London"><button class="btn" type="button" id="vtestBtn">Ask ARM</button></div>
+          <div class="msg hide" id="vtestMsg"></div>
+        </form>
+      </div>
+    </section>
+
+    <section data-pane="brand" class="hide">
+      <form class="card" id="brandForm" autocomplete="off" style="max-width:520px">
+        <h3>App name &amp; logo</h3>
+        <p class="hint">Shown on every page of the chat app (sign-in, chats, browser tab, phone home-screen icon) and on this admin page.</p>
+        <label class="f">App name</label><input type="text" id="brandNameIn" maxlength="40" placeholder="Veyon Chat">
+        <label class="f">Logo (PNG, JPG, WebP or GIF — any size, square works best)</label>
+        <div class="row" style="flex-wrap:nowrap"><span id="brandPrev" class="logo" style="margin:0"><i class="brandMark"></i></span><input type="file" id="brandFile" accept="image/png,image/jpeg,image/webp,image/gif"></div>
+        <div class="row" style="margin-top:16px"><button class="btn pri" type="submit">Save</button><button class="btn" type="button" id="brandRm">Remove logo</button></div>
+        <div class="msg hide" id="brandMsg"></div>
+      </form>
+    </section>
+
+    <section data-pane="system" class="hide">
+      <div class="grid g3" id="sysCards"></div>
+      <div class="grid g2 sec">
+        <div class="card"><h3>Activity log</h3><div class="tw" style="border:0"><table style="min-width:0"><tbody id="auditTb"></tbody></table></div></div>
+        <form class="card" id="pwForm" autocomplete="off"><h3>Change password</h3>
+          <label class="f">Current password</label><input type="password" id="pwCur" autocomplete="current-password">
+          <label class="f">New password (8+ characters)</label><input type="password" id="pwNew" autocomplete="new-password">
+          <div class="row" style="margin-top:16px"><button class="btn pri" type="submit">Change password</button></div>
+          <div class="msg hide" id="pwMsg"></div></form>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="tip hide" id="tip"></div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+function h(tag, attrs, ...kids) {           // text nodes only — user-typed names can never inject markup
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v; else if (k === "style") e.style.cssText = v; else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return e;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+const sv = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); return e; };
+const nf = n => Number(n || 0).toLocaleString();
+const bytes = n => { n = Number(n || 0); const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i]; };
+const ago = iso => { if (!iso) return "never"; const s = (Date.now() - new Date(iso)) / 1000; if (s < 60) return "just now"; if (s < 3600) return Math.floor(s / 60) + " min ago"; if (s < 86400) return Math.floor(s / 3600) + " h ago"; if (s < 86400 * 30) return Math.floor(s / 86400) + " d ago"; return new Date(iso).toLocaleDateString(); };
+const dur = s => { s = Number(s || 0); const d = Math.floor(s / 86400), hh = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? `${d}d ${hh}h` : hh ? `${hh}h ${m}m` : `${m}m`; };
+const pct = (a, b) => b ? Math.round(a / b * 100) + "%" : "–";
+const sum = a => a.reduce((x, d) => x + d.n, 0);
+
+async function api(path, opts = {}) {
+  const res = await fetch("/api/" + path, { credentials: "same-origin", cache: "no-store", ...opts,
+    headers: opts.body ? { "Content-Type": "application/json" } : undefined });
+  let data = null; try { data = await res.json(); } catch {}
+  if (res.status === 401 && path !== "login") { showGate({ configured: true }); throw new Error("Signed out"); }
+  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  return data;
+}
+const post = (p, b, m = "POST") => api(p, { method: m, body: JSON.stringify(b || {}) });
+function say(el, kind, text) { el.className = "msg " + kind; el.textContent = text; }
+
+/* ---------- charts ---------- */
+const tip = $("#tip");
+function bars(data, { color = "b", label = "" } = {}) {
+  const W = 560, H = 120, top = 8, bot = 18, n = data.length, max = Math.max(1, ...data.map(d => d.n));
+  const bw = W / n, svg = sv("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img", "aria-label": label });
+  svg.append(sv("line", { x1: 0, x2: W, y1: H - bot, y2: H - bot, stroke: "var(--line)" }));
+  data.forEach((d, i) => {
+    const hh = Math.max(d.n ? 3 : 1, (H - top - bot) * d.n / max), g = sv("g");
+    g.append(sv("rect", { class: color, x: i * bw + bw * .16, y: H - bot - hh, width: bw * .68, height: hh, rx: 2.5 }));
+    const hit = sv("rect", { class: "hov", x: i * bw, y: 0, width: bw, height: H });
+    const show = e => { tip.classList.remove("hide"); tip.textContent = `${new Date(d.day).toLocaleDateString(undefined, { day: "numeric", month: "short" })} · ${nf(d.n)}`; tip.style.left = e.clientX + "px"; tip.style.top = e.clientY + "px"; };
+    hit.addEventListener("mousemove", show); hit.addEventListener("click", show); hit.addEventListener("mouseleave", () => tip.classList.add("hide"));
+    g.append(hit); svg.append(g);
+  });
+  [0, n - 1].forEach(i => { const t = sv("text", { x: i ? W - 2 : 2, y: H - 4, "text-anchor": i ? "end" : "start" }); t.textContent = new Date(data[i].day).toLocaleDateString(undefined, { day: "numeric", month: "short" }); svg.append(t); });
+  return svg;
+}
+function hbars(rows, alt, fmt = nf) {
+  const max = Math.max(1, ...rows.map(r => r.n));
+  return rows.length ? h("div", {}, rows.map(r => h("div", { class: "hb" + (alt ? " alt" : "") }, h("span", {}, r.k), h("div", { class: "t" }, h("i", { style: `width:${Math.max(2, r.n / max * 100)}%` })), h("span", {}, fmt(r.n))))) : h("div", { class: "hint" }, "No data yet");
+}
+const card = (title, ...kids) => h("div", { class: "card" }, h("h3", {}, title), ...kids);
+const stat = (title, big, sub, cls = "") => h("div", { class: "card " + cls }, h("h3", {}, title), h("div", { class: "big" }, big), h("div", { class: "sub" }, sub));
+const bad = s => h("div", { class: "msg err", style: "grid-column:1/-1" }, "Couldn’t load: " + s.error);
+const share = (n, total) => `width:${Math.min(100, Math.max(2, n / Math.max(1, total) * 100))}%`;
+
+/* ---------- overview / reports ---------- */
+let D = null, S = null;
+function renderOverview() {
+  const u = D.users, m = D.messages, s = D.system;
+  $("#dbWarn").replaceChildren(u.error ? h("div", { class: "msg err", style: "margin:0 0 14px" }, u.error + " — the chat database must be running, and PGPASSWORD in this app’s .env must be right.") : "");
+  const k = $("#kpis"); k.replaceChildren();
+  if (!u.error) k.append(
+    stat("Total users", nf(u.total), [h("b", {}, "+" + nf(u.new_7d)), " this week · ", h("b", {}, "+" + nf(u.new_1d)), " today"], "hero"),
+    stat("Online now", nf(u.online), [h("b", {}, nf(u.active_1d)), " active in 24 h"]),
+    stat("Active this month", nf(u.active_30d), [h("b", {}, pct(u.active_30d, u.total)), " of everyone · ", h("b", {}, nf(u.active_7d)), " this week"]),
+    stat("Messages (24 h)", m.error ? "–" : nf(m.d1), m.error ? "" : [h("b", {}, nf(m.total)), " all-time · ", h("b", {}, nf(m.d7)), " this week"]));
+  const ch = $("#ovCharts"); ch.replaceChildren();
+  if (!u.error) ch.append(card("New sign-ups · last 30 days", bars(u.signups, { label: "Sign-ups per day" }), h("div", { class: "sub" }, h("b", {}, nf(sum(u.signups))), " new users in 30 days")),
+    card("Users who signed in · last 14 days", bars(u.activeByDay, { color: "b2", label: "Daily active users" }), h("div", { class: "sub" }, "Different people signing in each day")));
+  const hl = $("#health"); hl.replaceChildren();
+  if (s.error) return;
+  const hc = (t, ok, main, sub) => h("div", { class: "card" }, h("h3", {}, t), h("span", { class: "pill " + (ok ? "ok" : "warn") }, h("i", { class: "dot" }), main), h("div", { class: "sub" }, sub));
+  hl.append(hc("Chat database", true, "Connected", D.other.error ? "" : `Size ${bytes(D.other.dbBytes)}`),
+    hc("Sender email", s.mail.ready, s.mail.ready ? "Ready" : "Not set", s.mail.ready ? s.mail.user : "Add it on the Email tab"),
+    hc("AI key", s.ai.ready, s.ai.ready ? s.ai.provider : "Not set", s.ai.ready ? "Model: " + s.ai.model : "Add it on the AI & Voice tab"),
+    hc("“Hey ARM” replier", s.voice.enabled, s.voice.enabled ? "On" : "Off", s.ai.ready ? "Uses your AI key" : "Needs an AI key"));
+}
+function renderReports() {
+  const { users: u, messages: m, calls: c, email: e, ai: a, other: o, storage: st } = D;
+  const A = $("#rpA"), B = $("#rpB"); A.replaceChildren(); B.replaceChildren();
+  if (u.error) { A.append(bad(u)); return; }
+  const tot = Math.max(1, u.phone_app + u.web);
+  A.append(card("Who is using the app", hbars([{ k: "Total users", n: u.total }, { k: "Online now", n: u.online }, { k: "Active 24 h", n: u.active_1d }, { k: "Active 7 d", n: u.active_7d }, { k: "Active 30 d", n: u.active_30d }].map(r => ({ ...r })), false)),
+    card("Phone vs website",
+      h("div", { class: "split" }, h("i", { style: `width:${u.phone_app / tot * 100}%;background:var(--bar)` }), h("i", { style: `width:${u.web / tot * 100}%;background:var(--bar2)` })),
+      h("div", { class: "sub" }, h("b", {}, nf(u.phone_app)), " users on the phone app · ", h("b", {}, nf(u.web)), " on the website"),
+      h("div", { class: "sub" }, "Email verified: ", h("b", {}, nf(u.email_verified)), " · with mobile number: ", h("b", {}, nf(u.with_phone)), " · suspended: ", h("b", {}, nf(u.disabled)))));
+  if (!m.error) A.append(card("Messages · last 14 days", bars(m.perDay, { label: "Messages per day" }), h("div", { class: "sub" }, "Counts only — message text is end-to-end encrypted and never read.")),
+    card("What people send", hbars(m.byKind.map(r => ({ k: r.kind, n: r.n }))), h("div", { class: "sub" }, h("b", {}, nf(m.direct)), " one-to-one chats · ", h("b", {}, nf(m.groups)), " groups · ", h("b", {}, nf(m.statusesLive)), " live statuses")));
+  if (!c.error) B.append(card("Calls", h("div", { class: "big" }, nf(c.total)), h("div", { class: "sub" }, h("b", {}, nf(c.d1)), " today · ", h("b", {}, nf(c.video)), " video · avg answered ", h("b", {}, dur(c.avg_secs))), bars(c.perDay, { color: "b2", label: "Calls per day" })));
+  if (!a.error) B.append(card("AI use", h("div", { class: "big" }, nf(a.questions)), h("div", { class: "sub" }, "questions asked · ", h("b", {}, nf(a.q_1d)), " today · ", h("b", {}, nf(a.users_30d)), " people this month"), bars(a.perDay, { label: "AI questions per day" })));
+  if (!e.error) B.append(card("Sign-up emails", h("div", { class: "big" }, nf(e.sent_7d)), h("div", { class: "sub" }, "codes sent in 7 days · ", h("b", {}, pct(e.used_7d, e.sent_7d)), " were used"), bars(e.perDay, { label: "Emails per day" })));
+  if (!o.error) B.append(card("Reminders & scheduling", hbars([{ k: "Push devices", n: o.pushDevices }, { k: "Reminders due", n: o.remindersPending }, { k: "Scheduled msgs", n: o.scheduledPending }], true)),
+    card("Backups", h("div", { class: "sub", style: "margin:0 0 8px" }, "Chat backups made by users: ", h("b", {}, nf(o.cloudBackups.n)), " (", bytes(o.cloudBackups.bytes), ")"),
+      ...(D.dbBackups.length ? D.dbBackups.slice(0, 4).map(b => h("div", { class: "hb", style: "grid-template-columns:1fr auto" }, h("span", { class: "mono", style: "font-size:12px;overflow:hidden;text-overflow:ellipsis" }, b.name), h("span", {}, bytes(b.bytes)))) : [h("div", { class: "hint" }, "No database backup file found")])));
+  B.append(card("Disk used by the chat app", hbars([{ k: "Files sent", n: st.uploads.bytes }, { k: "Photos", n: st.avatars.bytes }, { k: "Chat backups", n: st.chatBackups.bytes }], true, bytes), h("div", { class: "sub" }, nf(st.uploads.files), " uploaded files · ", bytes(st.uploads.bytes + st.avatars.bytes + st.chatBackups.bytes), " total")));
+}
+$("#mailRepBtn").addEventListener("click", async e => { const b = e.target, m = $("#repMsg"); b.disabled = true; say(m, "info", "Sending…"); try { say(m, "ok", (await post("send-report", {})).message); } catch (x) { say(m, "err", x.message); } b.disabled = false; });
+
+/* ---------- users ---------- */
+let upage = 0, utimer;
+async function loadUsers() {
+  const d = await api(`users?q=${encodeURIComponent($("#uq").value)}&page=${upage}&sort=${$("#usort").value}`).catch(x => { $("#utb").replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty" }, x.message))); return null; });
+  if (!d) return;
+  const tb = $("#utb"); tb.replaceChildren();
+  if (!d.rows.length) tb.append(h("tr", {}, h("td", { colspan: 8, class: "empty" }, "No users found")));
+  for (const r of d.rows) tb.append(h("tr", {},
+    h("td", {}, h("b", {}, r.display_name)), h("td", { class: "mono" }, "@" + r.username), h("td", {}, r.email || "–", r.email && r.email_ok ? " ✓" : ""),
+    h("td", { class: "mono" }, r.phone || "–"), h("td", { title: new Date(r.created_at).toLocaleString() }, new Date(r.created_at).toLocaleDateString()),
+    h("td", {}, ago(r.last_seen)), h("td", {}, r.device || "–"),
+    h("td", {}, r.disabled_at ? h("span", { class: "pill bad" }, "Suspended") : h("span", { class: "pill ok" }, "Active"))));
+  $("#ucount").textContent = `${nf(d.total)} users · page ${d.page + 1} of ${Math.max(1, Math.ceil(d.total / 25))}`;
+  $("#uprev").disabled = d.page === 0; $("#unext").disabled = (d.page + 1) * 25 >= d.total;
+}
+
+/* ---------- settings ---------- */
+function fillSettings() {
+  for (const k of ["smtp_user", "mail_from", "mail_from_name", "smtp_host", "owner_email", "ai_model", "ai_base_url"]) $("#" + k).value = S[k] || "";
+  $("#smtp_port").value = S.smtp_port || ""; $("#smtp_pass").value = ""; $("#ai_key").value = ""; $("#ai_provider").value = S.ai_provider || "";
+  const tag = (id, o) => { const t = $("#" + id); t.textContent = o.set ? "saved " + o.hint : "not set"; t.style.color = o.set ? "var(--teal)" : "var(--mute)"; };
+  tag("smtp_pass_tag", S.smtp_pass); tag("ai_key_tag", S.ai_key);
+  $("#voice_enabled").checked = S.voice_enabled; $("#voice_prompt").value = S.voice_prompt; $("#voice_prompt").placeholder = S.default_voice_prompt; $("#voice_max_words").value = S.voice_max_words || "";
+}
+async function save(form, msgEl, fields, ok) {
+  const btn = $("button[type=submit]", form); btn.disabled = true;
+  try { S = await post("settings", fields, "PUT"); fillSettings(); say(msgEl, "ok", ok); refresh(true); } catch (e) { say(msgEl, "err", e.message); } finally { btn.disabled = false; }
+}
+$("#mailForm").addEventListener("submit", e => { e.preventDefault(); save(e.target, $("#mailMsg"), { smtp_user: $("#smtp_user").value, mail_from: $("#mail_from").value, mail_from_name: $("#mail_from_name").value, smtp_host: $("#smtp_host").value, smtp_port: $("#smtp_port").value, owner_email: $("#owner_email").value, smtp_pass: $("#smtp_pass").value }, "Saved."); });
+$("#aiForm").addEventListener("submit", e => { e.preventDefault(); save(e.target, $("#aiMsg"), { ai_provider: $("#ai_provider").value, ai_key: $("#ai_key").value, ai_model: $("#ai_model").value, ai_base_url: $("#ai_base_url").value }, "Saved."); });
+$("#voiceForm").addEventListener("submit", e => { e.preventDefault(); save(e.target, $("#voiceMsg"), { voice_enabled: $("#voice_enabled").checked, voice_prompt: $("#voice_prompt").value, voice_max_words: $("#voice_max_words").value }, "Saved."); });
+$("#aiClearBtn").addEventListener("click", async () => { if (!confirm("Remove the saved AI key?")) return; try { S = await post("settings", { ai_key: null }, "PUT"); fillSettings(); say($("#aiMsg"), "ok", "Key removed."); refresh(true); } catch (e) { say($("#aiMsg"), "err", e.message); } });
+$("#testMailBtn").addEventListener("click", async e => { const b = e.target, m = $("#testMailMsg"); b.disabled = true; say(m, "info", "Sending…"); try { say(m, "ok", (await post("test-email", { to: $("#testTo").value })).message); } catch (x) { say(m, "err", x.message); } b.disabled = false; });
+$("#aiTestBtn").addEventListener("click", async e => { const b = e.target, m = $("#aiMsg"); b.disabled = true; say(m, "info", "Asking the AI…"); try { const r = await post("test-ai", {}); say(m, "ok", `Works (${r.ms} ms): “${r.reply}”`); } catch (x) { say(m, "err", x.message); } b.disabled = false; });
+$("#vtestBtn").addEventListener("click", async e => { const b = e.target, m = $("#vtestMsg"); b.disabled = true; say(m, "info", "ARM is thinking…"); try { say(m, "ok", (await post("test-voice", { text: $("#vtext").value })).reply); } catch (x) { say(m, "err", x.message); } b.disabled = false; });
+$("#envBtn").addEventListener("click", async () => { const o = $("#envOut"); try { const r = await fetch("/api/env-lines", { credentials: "same-origin" }); o.textContent = await r.text(); o.classList.remove("hide"); } catch {} });
+$("#pwForm").addEventListener("submit", async e => { e.preventDefault(); try { await post("password", { current: $("#pwCur").value, new: $("#pwNew").value }); say($("#pwMsg"), "ok", "Password changed."); e.target.reset(); } catch (x) { say($("#pwMsg"), "err", x.message); } });
+
+/* ---------- system ---------- */
+async function renderSystem() {
+  const s = D.system, c = $("#sysCards"); c.replaceChildren();
+  if (s.error) c.append(bad(s)); else c.append(
+    stat("This app has run for", dur(s.uptimeSecs), `${s.os} · Python ${s.python}`),
+    stat("Sender email", s.mail.ready ? "Ready" : "Off", s.mail.user || "Not set"),
+    stat("AI", s.ai.ready ? s.ai.provider : "Off", s.ai.ready ? s.ai.model : "Not set"));
+  const a = await api("audit"), tb = $("#auditTb"); tb.replaceChildren();
+  if (!a.rows.length) tb.append(h("tr", {}, h("td", { class: "empty" }, "Nothing yet")));
+  a.rows.forEach(r => tb.append(h("tr", {}, h("td", {}, h("b", {}, r.action), r.detail ? " · " + r.detail : ""), h("td", { class: "mono" }, r.ip || ""), h("td", {}, ago(r.at)))));
+}
+
+/* ---------- app name + logo ---------- */
+let BRAND = { name: "Chat Report Center", logoUrl: null }, brandPick = null;
+function applyBrand(b) {
+  BRAND = b; document.title = b.name + " — Admin";
+  $$(".brandName").forEach(e => e.textContent = b.name);
+  $$(".brandMark").forEach(m => { if (b.logoUrl) { m.replaceChildren(h("img", { src: b.logoUrl, alt: "", style: "width:100%;height:100%;object-fit:cover;border-radius:inherit" })); m.style.background = "none"; } else { m.style.background = ""; } });
+  let ic = $("link[rel=icon]"); if (b.logoUrl && ic) ic.href = b.logoUrl;
+}
+const loadBrand = () => fetch("/api/branding", { cache: "no-store" }).then(r => r.json()).then(applyBrand).catch(() => {});
+function readFile(f) { return new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(f); }); }
+// Any picture is shrunk to at most 512px (PNG, transparency kept) before upload, so big photos just work.
+function shrink(f, max = 512) { return new Promise((ok, no) => { const u = URL.createObjectURL(f), im = new Image();
+  im.onload = () => { const k = Math.min(1, max / Math.max(im.width, im.height)), c = document.createElement("canvas");
+    c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(u); ok(c.toDataURL("image/png")); };
+  im.onerror = () => { URL.revokeObjectURL(u); no(new Error("That file isn’t a picture the browser can open.")); }; im.src = u; }); }
+$("#brandFile").addEventListener("change", async e => { const f = e.target.files[0], m = $("#brandMsg"); brandPick = null; if (!f) return;
+  try { brandPick = await shrink(f); } catch (x) { say(m, "err", x.message); e.target.value = ""; return; }
+  m.classList.add("hide"); $("#brandPrev .brandMark").replaceChildren(h("img", { src: brandPick, alt: "", style: "width:100%;height:100%;object-fit:cover;border-radius:inherit" })); $("#brandPrev .brandMark").style.background = "none"; });
+$("#brandForm").addEventListener("submit", async e => { e.preventDefault(); const m = $("#brandMsg");
+  try { const b = await post("branding", { name: $("#brandNameIn").value, ...(brandPick ? { logo: brandPick } : {}) }); brandPick = null; $("#brandFile").value = ""; applyBrand(b); say(m, "ok", "Saved. The chat app picks it up on its next page load."); } catch (x) { say(m, "err", x.message); } });
+$("#brandRm").addEventListener("click", async () => { const m = $("#brandMsg"); try { applyBrand(await post("branding", { removeLogo: true })); say(m, "ok", "Logo removed."); } catch (x) { say(m, "err", x.message); } });
+
+/* ---------- shell ---------- */
+const TITLES = { overview: ["Overview", ""], users: ["Users", "Everyone who has an account"], reports: ["Reports", "Usage over time — ready to download"], mail: ["Email", "Sender email and app password"], ai: ["AI & Voice", "AI key for chat and “Hey ARM”"], brand: ["App name & logo", "Applied to every page"], system: ["System", "Health and activity log"] };
+let tab = "overview";
+function paint() { if (tab === "overview") renderOverview(); else if (tab === "reports") renderReports(); else if (tab === "system") renderSystem().catch(() => {}); }
+function go(t) {
+  tab = t; $$("[data-pane]").forEach(p => p.classList.toggle("hide", p.dataset.pane !== t));
+  $$(".nav[data-tab]").forEach(n => n.dataset.tab === t ? n.setAttribute("aria-current", "page") : n.removeAttribute("aria-current"));
+  $("#title").textContent = TITLES[t][0]; $("#subtitle").textContent = TITLES[t][1] || (D ? "Updated " + new Date(D.generatedAt).toLocaleTimeString() : "");
+  try { history.replaceState(null, "", "#" + t); } catch {}
+  if (t === "users") loadUsers(); if (t === "brand") $("#brandNameIn").value = BRAND.name; if (D) paint();
+}
+async function refresh(quiet) {
+  const b = $("#refreshBtn"); if (!quiet) b.disabled = true;
+  try { D = await api("overview"); if (tab === "overview") $("#subtitle").textContent = "Updated " + new Date(D.generatedAt).toLocaleTimeString(); paint(); $("#liveTag").className = "pill ok live"; $("#liveTxt").textContent = "Live"; }
+  catch { $("#liveTag").className = "pill bad"; $("#liveTxt").textContent = "Offline"; } finally { b.disabled = false; }
+}
+$$(".nav[data-tab]").forEach(n => n.addEventListener("click", () => go(n.dataset.tab)));
+$("#refreshBtn").addEventListener("click", () => { refresh(); if (tab === "users") loadUsers(); });
+$("#uq").addEventListener("input", () => { clearTimeout(utimer); utimer = setTimeout(() => { upage = 0; loadUsers(); }, 300); });
+$("#usort").addEventListener("change", () => { upage = 0; loadUsers(); });
+$("#uprev").addEventListener("click", () => { upage--; loadUsers(); });
+$("#unext").addEventListener("click", () => { upage++; loadUsers(); });
+$("#outBtn").addEventListener("click", async () => { await post("logout"); location.reload(); });
+$("#themeBtn").addEventListener("click", () => { const d = document.documentElement, dark = d.dataset.theme ? d.dataset.theme === "dark" : matchMedia("(prefers-color-scheme:dark)").matches; d.dataset.theme = dark ? "light" : "dark"; try { localStorage.setItem("report-theme", d.dataset.theme); } catch {} });
+try { const t = localStorage.getItem("report-theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+
+/* ---------- sign-in ---------- */
+function showGate(info) {
+  $("#shell").classList.add("hide"); $("#gate").classList.remove("hide");
+  const setup = !info.configured;
+  $("#gateTitle").textContent = setup ? "Create your password" : "Sign in";
+  $("#gateBtn").textContent = setup ? "Create password" : "Sign in";
+  $("#pw2wrap").classList.toggle("hide", !setup); $("#gateForm").dataset.mode = setup ? "setup" : "login";
+  $("#pw").autocomplete = setup ? "new-password" : "current-password";
+  $("#gateHint").textContent = setup ? (info.canSetup ? "First time here. Choose a password (8+ characters) — you’ll use it every time." : "Not set up yet. Open this page once on the PC where it runs (http://localhost:4700), or set ADMIN_PASSWORD in .env.") : "";
+  $("#gateBtn").disabled = setup && !info.canSetup;
+}
+$("#gateForm").addEventListener("submit", async e => {
+  e.preventDefault(); const m = $("#gateMsg"), setup = e.target.dataset.mode === "setup"; m.classList.add("hide");
+  if (setup && $("#pw").value !== $("#pw2").value) { say(m, "err", "The two passwords don’t match."); return; }
+  try { await post(setup ? "setup" : "login", { password: $("#pw").value }); $("#pw").value = $("#pw2").value = ""; start(); } catch (x) { say(m, "err", x.message); }
+});
+let timer;
+async function start() {
+  const info = await api("session").catch(() => null);
+  if (!info) { showGate({ configured: true }); say($("#gateMsg"), "err", "Can’t reach the server."); return; }
+  if (!info.authed) { showGate(info); return; }
+  $("#gate").classList.add("hide"); $("#shell").classList.remove("hide");
+  try { S = await api("settings"); fillSettings(); } catch {}
+  await refresh(true);
+  const t = (location.hash || "").slice(1); go(t in TITLES ? t : "overview");
+  clearInterval(timer); timer = setInterval(() => { if (!document.hidden) refresh(true); }, 30000);
+}
+loadBrand();
+start();
+</script>
+</body>
+</html>

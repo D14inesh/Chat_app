@@ -1,7 +1,7 @@
 """Self-signed TLS cert for LAN/HTTPS access. WebCrypto (the whole E2E flow)
 only runs in a secure context — https:// or literal localhost — so a phone
 on the same Wi-Fi needs HTTPS. Writes backend/certs/ and copies the same pair
-to frontend/certs/. Re-run after the PC's LAN IP changes.
+to application/certs/. Re-run after the PC's LAN IP changes.
 
   python gen_cert.py
   python gen_cert.py 103.207.3.66        # also cover a public IP / hostname
@@ -67,7 +67,7 @@ def main():
     ))
     (CERT_DIR / "cert.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
-    fe_certs = PROJECT_DIR / "frontend" / "certs"
+    fe_certs = PROJECT_DIR / "application" / "certs"
     fe_certs.mkdir(parents=True, exist_ok=True)
     for f in ("key.pem", "cert.pem"):
         shutil.copy2(CERT_DIR / f, fe_certs / f)

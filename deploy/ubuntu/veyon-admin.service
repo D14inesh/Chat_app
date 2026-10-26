@@ -1,0 +1,35 @@
+# The owner's admin app (admin/), on 127.0.0.1:4700 behind Nginx. Installed
+# by deploy/ubuntu/setup.sh --admin-domain ({{APP}} = the chat-application folder).
+#
+#   systemctl status veyon-admin        journalctl -u veyon-admin -f
+
+[Unit]
+Description=Veyon Chat admin app
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=veyon
+Group=veyon
+WorkingDirectory={{APP}}/admin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart={{APP}}/admin/venv/bin/python server.py
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# data/ = its own settings; the others = branding logo and backup reports.
+ReadWritePaths={{APP}}/admin/data /var/lib/veyon /var/backups/veyon
+
+[Install]
+WantedBy=multi-user.target

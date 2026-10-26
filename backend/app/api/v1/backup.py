@@ -2,7 +2,7 @@
 end-to-end encrypted backup.
 
 The device builds the backup, encrypts it with a key made from a backup
-password (PBKDF2 → AES-GCM, see frontend/public/js/features/backup.js), and
+password (PBKDF2 → AES-GCM, see application/public/js/features/backup.js), and
 uploads the opaque result. The password never reaches the server, so the
 server can store the file but cannot read it."""
 from pathlib import Path

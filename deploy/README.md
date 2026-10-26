@@ -27,7 +27,7 @@ The same layout runs on two kinds of server:
 
 - **Nginx** is the only door. It does HTTPS (certificate from
   `backend\certs`), serves the website files straight from
-  `frontend\public`, and forwards `/api` and `/ws` to the workers, spreading
+  `application\public`, and forwards `/api` and `/ws` to the workers, spreading
   connections over them (`least_conn`). If a worker is down it uses the others.
 - **API workers** are the same FastAPI app as before, several copies side by
   side. Each holds only its own users' live sockets.
@@ -70,4 +70,4 @@ more API servers behind Nginx.
 ## Development
 
 Locally nothing changes: with no `REDIS_URL`, a single `python run.py` keeps
-the shared state in its own memory, and `frontend\serve.py` serves the site.
+the shared state in its own memory, and `application\serve.py` serves the site.

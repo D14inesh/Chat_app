@@ -1,4 +1,4 @@
-"""API + WebSocket server. The frontend is served separately (../frontend).
+"""API + WebSocket server. The frontend is served separately (../application).
 
 On the server: Users → Nginx → several of these workers → Redis → PostgreSQL
 (see deploy/README.md). Each worker is one `python run.py` with its own PORT,

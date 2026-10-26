@@ -6,14 +6,25 @@ storage/wallpapers/*
 !storage/**/.gitkeep
 database/backups/*
 !database/backups/.gitkeep
-frontend/certs/
+application/certs/
 backend/certs/
 backend/.env
-frontend/.env
+application/.env
 backend/venv/
 __pycache__/
 storage/catalog/*
-frontend/node_modules/
+application/node_modules/
 storage/chat_backups/*
 # Nginx, Redis and their generated config on the server (scripts/setup-server.ps1)
 runtime/
+# Owner admin app (admin/): its venv, its own database and secrets
+admin/venv/
+admin/data/
+admin/.env
+storage/branding/*
+!storage/branding/.gitkeep
+
+# Built phone apps (too big for git)
+apk/
+mobile/build/
+*.apk

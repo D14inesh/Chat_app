@@ -1,0 +1,76 @@
+name: veyon_chat_mobile
+description: Veyon Chat — end-to-end encrypted messaging (mobile client, MVP)
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  libsignal_protocol_dart: ^0.8.2
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  dio: ^5.7.0
+  cookie_jar: ^4.0.8
+  dio_cookie_manager: ^3.1.1
+  web_socket_channel: ^3.0.1
+  cryptography: ^2.7.0
+  # package:cryptography's pure-Dart backend has no P-256 ECDH (it throws
+  # UnimplementedError), so the curve math for that one step uses pointycastle.
+  pointycastle: ^4.0.0
+  # Opening links, map locations and phone numbers from messages.
+  url_launcher: ^6.3.1
+  # "Share location" in the attach menu.
+  geolocator: ^13.0.2
+  # Live speech-to-text while recording (pick a language, words fill the box).
+  speech_to_text: ^7.0.0
+  # Video statuses (and video attachments).
+  video_player: ^2.9.2
+  # "Save" on a status photo/video → the phone's gallery.
+  gal: ^2.3.0
+  flutter_secure_storage: ^9.2.2
+  drift: ^2.20.3
+  sqlite3_flutter_libs: ^0.5.24
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  intl: ^0.19.0
+  uuid: ^4.5.1
+  file_picker: ^8.1.4
+  local_auth: ^2.3.0
+  mime: ^1.0.6
+  record: ^5.2.0
+  audioplayers: ^6.1.0
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^6.0.2
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.9.4
+  flutter_webrtc: ^1.6.2
+  open_filex: ^4.7.0
+  share_plus: 10.1.4
+  connectivity_plus: ^7.3.1
+
+dependency_overrides:
+  # file_picker 8.x pulls a flutter_plugin_android_lifecycle version that
+  # requires compileSdk 36, which this Flutter SDK's own compileSdkVersion
+  # doesn't provide by default -- pin back to the last version built against
+  # compileSdk 34 rather than fighting the whole toolchain's SDK level.
+  flutter_plugin_android_lifecycle: 2.0.24
+  # record 5.2.x resolves record_platform_interface 1.6.0, but its default
+  # record_linux pin (0.7.2) predates that interface version and is missing
+  # required method implementations -- Linux isn't even a build target here,
+  # but the Dart kernel compile still fails on it since the federated plugin
+  # graph is compiled as a whole. Pin a record_linux that actually matches.
+  record_linux: ^1.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  drift_dev: ^2.20.3
+  build_runner: ^2.4.13
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
+
+flutter:
+  uses-material-design: true
