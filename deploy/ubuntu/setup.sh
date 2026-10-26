@@ -172,7 +172,10 @@ text = pat.sub(lambda _: line, text) if pat.search(text) else text.rstrip("\n") 
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
-if [ ! -f "$ENV_FILE" ]; then
+if [ ! -f "$ENV_FILE" ] && [ -f "$APP/.env" ]; then
+    cp "$APP/.env" "$ENV_FILE"
+    ok "created from the repo root .env — add SMTP_USER/SMTP_PASS and VAPID keys"
+elif [ ! -f "$ENV_FILE" ]; then
     cp "$APP/backend/.env.example" "$ENV_FILE"
     ok "created from .env.example — add SMTP_USER/SMTP_PASS (Gmail app password) and VAPID keys"
 else

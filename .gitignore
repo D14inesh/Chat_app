@@ -9,6 +9,7 @@ database/backups/*
 application/certs/
 backend/certs/
 backend/.env
+!/.env
 application/.env
 backend/venv/
 __pycache__/
