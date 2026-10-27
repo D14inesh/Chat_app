@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./application
+    build: ./web
     image: chat-frontend
     environment:
       API_BASE: ${API_BASE:-}
@@ -43,7 +43,7 @@ services:
       - "${FRONTEND_PORT:-8180}:80"
       - "${FRONTEND_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./application/certs:/etc/nginx/certs:ro
+      - ./web/certs:/etc/nginx/certs:ro
     depends_on:
       - backend
     restart: unless-stopped

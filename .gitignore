@@ -6,15 +6,17 @@ storage/wallpapers/*
 !storage/**/.gitkeep
 database/backups/*
 !database/backups/.gitkeep
-application/certs/
+web/certs/
 backend/certs/
+.env
 backend/.env
-!/.env
-application/.env
+web/.env
+*.iml
+.flutter-plugins-dependencies
 backend/venv/
 __pycache__/
 storage/catalog/*
-application/node_modules/
+web/node_modules/
 storage/chat_backups/*
 # Nginx, Redis and their generated config on the server (scripts/setup-server.ps1)
 runtime/

@@ -1,5 +1,5 @@
 # Frontend — static files served by nginx.
-#   docker build -t chat-frontend ./application
+#   docker build -t chat-frontend ./web
 FROM nginx:1.27-alpine
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf

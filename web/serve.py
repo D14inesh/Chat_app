@@ -20,7 +20,7 @@ CERT_DIR = HERE / "certs"
 
 
 def load_env_file(path: Path):
-    """KEY=VALUE lines from application/.env (optional) — real environment
+    """KEY=VALUE lines from web/.env (optional) — real environment
     variables win. Lets a server pick its own ports without editing code."""
     if not path.exists():
         return

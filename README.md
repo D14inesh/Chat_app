@@ -4,7 +4,7 @@ End-to-end encrypted chat. **One repository, three apps, one shared backend.**
 
 | Folder | What it is |
 |---|---|
-| `application/` | The web app (static site, no build step) |
+| `web/` | The web app (static site, no build step) |
 | `mobile/` | The Flutter phone app |
 | `admin/` | The owner's admin app: reports, email/AI settings, app name + logo |
 | `backend/` | The single FastAPI backend (REST + WebSocket) all three use |
@@ -16,7 +16,7 @@ serves to the web and phone apps.
 
 ```
 ShutUp/
-├── application/              static web app, no build step
+├── web/                      static web app, no build step
 │   ├── public/               the files the browser loads
 │   │   ├── config.js         ← backend URL (the only file to edit when deploying)
 │   │   ├── index.html
@@ -80,7 +80,7 @@ copy .env.example .env        # then fill in PGPASSWORD, JWT_SECRET, VAPID keys
 .\venv\Scripts\python run.py
 
 # Frontend (any Python 3, no packages)
-cd application
+cd web
 python serve.py
 ```
 
@@ -90,7 +90,7 @@ https://&lt;pc-lan-ip&gt;:4443 once and accept it there, because the browser has
 
 ## How the two halves talk
 
-- `application/public/config.js` decides where the API is. By default it uses the
+- `web/public/config.js` decides where the API is. By default it uses the
   **same host as the page, port 4000 (http) or 4443 (https)**, so localhost and
   LAN IPs work with no edits. To use a separate API domain, set
   `apiBase: 'https://api.example.com'`.
@@ -113,7 +113,7 @@ cd backend
 docker compose up -d --build        # or: docker build -t chat-backend .
 
 # Frontend -> http://localhost:8080   (LAN: https://<pc-ip>:8443)
-cd application
+cd web
 docker compose up -d --build        # or: docker build -t chat-frontend .
 ```
 
@@ -124,7 +124,7 @@ docker run -d --name chat-backend -p 8000:4000 -p 8444:4443 --env-file backend/.
   -e PGHOST=host.docker.internal -v ${PWD}/storage:/data/storage -v ${PWD}/backend/certs:/app/certs:ro chat-backend
 
 docker run -d --name chat-frontend -p 8080:80 -p 8443:443 `
-  -e API_HTTP_PORT=8000 -e API_HTTPS_PORT=8444 -v ${PWD}/application/certs:/etc/nginx/certs:ro chat-frontend
+  -e API_HTTP_PORT=8000 -e API_HTTPS_PORT=8444 -v ${PWD}/web/certs:/etc/nginx/certs:ro chat-frontend
 ```
 
 **Backend container**
@@ -170,7 +170,7 @@ where, logs and limits: [deploy/README.md](deploy/README.md).
 
 ## Deploying separately
 
-- **Frontend:** upload `application/public/` to any static host (nginx, IIS,
+- **Frontend:** upload `web/public/` to any static host (nginx, IIS,
   Netlify, …) and edit `config.js`.
 - **Backend:** copy `backend/` + `database/` + `storage/`, create the venv,
   set `.env` (including `CORS_ORIGINS` = the frontend's URL), then run `python run.py`.
