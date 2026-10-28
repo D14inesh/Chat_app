@@ -1,7 +1,7 @@
 # Whole stack (backend + frontend). Run from this folder:
 #   docker compose up -d --build
-#   -> app:  http://localhost:8180   (LAN: https://<pc-ip>:8443)
-#   -> API:  http://localhost:8100   (LAN: https://<pc-ip>:8444)
+#   -> app:  http://localhost:7180   (LAN: https://<pc-ip>:7443)
+#   -> API:  http://localhost:7100   (LAN: https://<pc-ip>:7444)
 #
 # Backend settings come from backend/.env (PG*, JWT_SECRET, VAPID keys, ...).
 # PostgreSQL runs on this PC, reached from the container as host.docker.internal.
@@ -20,11 +20,11 @@ services:
       PORT: "4000"
       HTTPS_PORT: "4443"
       # Every origin the frontend is opened from.
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8180,http://127.0.0.1:8180,https://localhost:8443}
-      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-https://(192\.168|10|172\.(1[6-9]|2\d|3[01]))(\.\d{1,3}){2,3}:8443}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:7180,http://127.0.0.1:7180,https://localhost:7443}
+      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-https://(192\.168|10|172\.(1[6-9]|2\d|3[01]))(\.\d{1,3}){2,3}:7443}
     ports:
-      - "${BACKEND_PORT:-8100}:4000"
-      - "${BACKEND_HTTPS_PORT:-8444}:4443"
+      - "${BACKEND_PORT:-7100}:4000"
+      - "${BACKEND_HTTPS_PORT:-7444}:4443"
     volumes:
       - ./storage:/data/storage                      # uploads, avatars, wallpapers, branding
       - ./backend/certs:/app/certs:ro
@@ -37,11 +37,11 @@ services:
     image: chat-frontend
     environment:
       API_BASE: ${API_BASE:-}
-      API_HTTP_PORT: ${BACKEND_PORT:-8100}
-      API_HTTPS_PORT: ${BACKEND_HTTPS_PORT:-8444}
+      API_HTTP_PORT: ${BACKEND_PORT:-7100}
+      API_HTTPS_PORT: ${BACKEND_HTTPS_PORT:-7444}
     ports:
-      - "${FRONTEND_PORT:-8180}:80"
-      - "${FRONTEND_HTTPS_PORT:-8443}:443"
+      - "${FRONTEND_PORT:-7180}:80"
+      - "${FRONTEND_HTTPS_PORT:-7443}:443"
     volumes:
       - ./web/certs:/etc/nginx/certs:ro
     depends_on:
