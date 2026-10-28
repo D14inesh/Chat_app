@@ -1,35 +1,62 @@
-# Whole stack (backend + frontend). Run from this folder:
+# Whole stack: PostgreSQL + backend + frontend. Nothing else to install.
+# Run from this folder:
 #   docker compose up -d --build
-#   -> app:  http://localhost:7180   (LAN: https://<pc-ip>:7443)
-#   -> API:  http://localhost:7100   (LAN: https://<pc-ip>:7444)
+#   -> app:  http://<server-ip>:7180   (HTTPS: https://<server-ip>:7443 when web/certs exist)
+#   -> API:  http://<server-ip>:7100   (HTTPS: https://<server-ip>:7444)
 #
-# Backend settings come from backend/.env (PG*, JWT_SECRET, VAPID keys, ...).
-# PostgreSQL runs on this PC, reached from the container as host.docker.internal.
-# Change any published port in a .env file next to this one.
+# No setup needed: the database is created here, the schema is applied on
+# start, and a JWT_SECRET is generated into storage/.jwt_secret on first run.
+# Optional: a .env file next to this one can override any ${VARIABLE} below,
+# and backend/.env (if present) adds backend settings (SMTP_*, VAPID_*, ...).
 
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}   # not published outside the compose network
+      POSTGRES_DB: ${POSTGRES_DB:-vesper_chat}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-vesper_chat}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   backend:
     build: ./backend
     image: chat-backend
-    env_file: ./backend/.env
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
-      # "localhost" inside a container is the container itself.
-      PGHOST: host.docker.internal
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PGDATABASE: ${POSTGRES_DB:-vesper_chat}
       OLLAMA_URL: http://host.docker.internal:11434/api/chat
       WHISPER_URL: http://host.docker.internal:8500
       PORT: "4000"
       HTTPS_PORT: "4443"
-      # Every origin the frontend is opened from.
+      # Allow the frontend from any address it is opened on (localhost, LAN IP, domain).
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:7180,http://127.0.0.1:7180,https://localhost:7443}
-      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-https://(192\.168|10|172\.(1[6-9]|2\d|3[01]))(\.\d{1,3}){2,3}:7443}
+      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-^https?://[^/:]+:(7180|7443)$$}
     ports:
       - "${BACKEND_PORT:-7100}:4000"
       - "${BACKEND_HTTPS_PORT:-7444}:4443"
     volumes:
-      - ./storage:/data/storage                      # uploads, avatars, wallpapers, branding
+      - ./storage:/data/storage                      # uploads, avatars, wallpapers, branding, JWT secret
+      - ./database/postgres:/database/postgres:ro    # schema.sql, re-applied on every start
       - ./backend/certs:/app/certs:ro
     extra_hosts:
-      - "host.docker.internal:host-gateway"          # needed on Linux; harmless on Docker Desktop
+      - "host.docker.internal:host-gateway"          # Ollama / Whisper on the host (optional)
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -47,3 +74,6 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  pgdata:
